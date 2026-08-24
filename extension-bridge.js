@@ -81,12 +81,5 @@
     throw new Error(errors.join(" | ") || "No queueUrl/ebsUrl in config.js");
   };
 
-  window.BLTHouseExtFetchState = async function (houseId) {
-    const base = queueBase();
-    if (!base || !houseId) return null;
-    const res = await fetch(base + "/state?house=" + encodeURIComponent(houseId), { cache: "no-store" });
-    if (!res.ok) return null;
-    const data = await res.json().catch(() => null);
-    return data && data.house ? data.house : null;
-  };
+  window.BLTHouseExtFetchState = async function () { return null; };
 })();

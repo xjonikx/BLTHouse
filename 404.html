@@ -146,7 +146,7 @@ header{
     </div>
   </div>
   <div class="meta">
-    <div class="meta-pill"><span class="live-dot" id="liveDot"></span><span id="syncLabel">Синхронизация…</span></div>
+    <div class="meta-pill"><span class="live-dot" id="liveDot"></span><span id="syncLabel">Очередь</span></div>
     <div class="meta-pill">💰 <span id="gold">—</span></div>
   </div>
 </header>
@@ -172,7 +172,7 @@ header{
 </div>
 <footer class="footer">
   <span>BLTHouse · House Control Panel</span>
-  <span id="footerState">Ожидание данных из игры…</span>
+  <span id="footerState">Очередь · клики без чата</span>
 </footer>
 </div>
 
@@ -232,28 +232,64 @@ function apiBase(){
   return '';
 }
 
+function isQueueMode(){
+  const c = window.BLT_HOUSE_EXT || {};
+  return !apiBase() && !!(c.ebsUrl || c.queueUrl);
+}
+
+function queueStub(houseId, viewer){
+  const actions = [
+    {Id:'upgrade_house', Label:'Улучшить дом', Room:'common', Available:true},
+    {Id:'unlock_workshop', Label:'Построить мастерскую', Room:'workshop', Available:true},
+    {Id:'upgrade_forge', Label:'Улучшить кузницу', Room:'workshop', Available:true},
+    {Id:'unlock_yard', Label:'Открыть двор', Room:'yard', Available:true},
+    {Id:'upgrade_stable', Label:'Улучшить конюшню', Room:'yard', Available:true},
+    {Id:'expand_storage', Label:'Расширить склад', Room:'storage', Available:true},
+    {Id:'unlock_guest_room', Label:'Гостевая комната', Room:'family', Available:true},
+    {Id:'expand_family', Label:'Места для семьи', Room:'family', Available:true},
+  ];
+  return {
+    HouseId: houseId,
+    DisplayName: 'Дом ' + (viewer || houseId),
+    OwnerPlayerId: viewer || '',
+    OwnerName: viewer || '—',
+    LocationName: 'в игре',
+    LocationType: '—',
+    HouseLevel: 1,
+    HouseLevelRoman: 'I',
+    StatusText: 'команды уходят в игру через очередь',
+    IsOwnerViewer: true,
+    Gold: 0,
+    Rooms: [
+      {Type:'common', Unlocked:true, Level:1, Description:'Общая'},
+      {Type:'family', Unlocked:true, Level:1, Description:'Семья'},
+      {Type:'workshop', Unlocked:true, Level:1, Description:'Мастерская'},
+      {Type:'yard', Unlocked:true, Level:1, Description:'Двор'},
+      {Type:'storage', Unlocked:true, Level:1, Description:'Склад'},
+    ],
+    Residents: [], Guests: [], Pets: [], Mounts: [], Furniture: [], StorageItems: [], History: [],
+    Actions: actions,
+    Revision: 0,
+  };
+}
+
 async function fetchHouse(){
   const {houseId, viewer} = parseRoute();
   if(!houseId){
-    showBoot('Укажите дом', 'Ссылка: .../index.html#/house/{houseId}?viewer=Ник  или путь /house/...');
+    showBoot('Укажите дом', 'Ссылка: .../index.html?house=HOUSE_ID&viewer=Ник');
     return null;
   }
   if(viewer) localStorage.setItem('blt_house_viewer', viewer);
 
-  // GitHub Pages: try Worker state snapshot, else stub (clicks still go to queue)
-  if(!apiBase()){
-    if (typeof window.BLTHouseExtFetchState === 'function') {
-      try {
-        const remote = await window.BLTHouseExtFetchState(houseId);
-        if (remote) return remote;
-      } catch (e) { console.warn('queue state', e); }
-    }
+  // Queue mode: no snapshots — UI is a remote control, game applies actions.
+  if(isQueueMode()){
     showApp();
-    return { HouseId: houseId, DisplayName: 'Дом (ожидание снимка)', IsOwnerViewer: true, Rooms: [], Residents: [], Guests: [], Actions: [
-      {Id:'upgrade_house', Label:'Улучшить дом', Room:'common', Available:true},
-      {Id:'upgrade_forge', Label:'Улучшить кузницу', Room:'workshop', Available:true},
-      {Id:'expand_storage', Label:'Склад +', Room:'storage', Available:true},
-    ], StatusText: 'Queue mode — клики без чата' };
+    return queueStub(houseId, viewer);
+  }
+
+  if(!apiBase()){
+    showBoot('Нет связи', 'Укажи ebsUrl в config.js (Worker) или localGameApi.');
+    return null;
   }
 
   const url = `${apiBase()}/api/house/${encodeURIComponent(houseId)}?viewer=${encodeURIComponent(viewer||'')}`;
@@ -275,18 +311,28 @@ async function fetchHouse(){
 }
 
 async function postAction(action, extra={}){
-  // Primary: Cloudflare queue (no chat). Then refresh state from Worker if possible.
+  if (typeof window.BLTHouseExtPublishAction === 'function' && isQueueMode()) {
+    try {
+      const pub = await window.BLTHouseExtPublishAction(action, extra);
+      toast('Отправлено в игру');
+      setFooter('Очередь: ' + action + ' · без чата');
+      document.getElementById('syncLabel').textContent = 'Отправлено';
+      document.getElementById('liveDot').classList.remove('off');
+      return {ok:true, msg:'queue', via: pub.via, house:null};
+    } catch (e) {
+      toast(String(e.message||e));
+      setFooter(String(e.message||e));
+      document.getElementById('liveDot').classList.add('off');
+      document.getElementById('syncLabel').textContent = 'Ошибка';
+      return {ok:false, msg:String(e.message||e)};
+    }
+  }
+
   if (typeof window.BLTHouseExtPublishAction === 'function' && ((window.BLT_HOUSE_EXT||{}).ebsUrl || (window.BLT_HOUSE_EXT||{}).queueUrl)) {
     try {
       const pub = await window.BLTHouseExtPublishAction(action, extra);
-      toast('В очередь ('+(pub.via||'queue')+')');
+      toast('В очередь');
       setFooter('Queue: '+action);
-      await new Promise(r => setTimeout(r, 1200));
-      if (typeof window.BLTHouseExtFetchState === 'function') {
-        const {houseId} = parseRoute();
-        const remote = await window.BLTHouseExtFetchState(houseId);
-        if (remote) { house = normalize(remote); renderAll(); }
-      }
       if (apiBase()) await refresh(true);
       return {ok:true, msg:'queue', house:null};
     } catch (e) {
@@ -745,7 +791,13 @@ async function refresh(force){
 
 (async function boot(){
   await refresh(true);
-  pollTimer=setInterval(()=>refresh(false), 2000);
+  // Queue mode: no snapshot polling — panel is a remote control only.
+  if (!isQueueMode()) {
+    pollTimer=setInterval(()=>refresh(false), 2000);
+  } else {
+    document.getElementById('syncLabel').textContent='Очередь';
+    setFooter('Кнопки → Worker → игра · без чата · без снимков');
+  }
 })();
 </script>
 </body>
