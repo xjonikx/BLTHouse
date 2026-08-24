@@ -106,7 +106,7 @@
     while (Date.now() - t0 < limit) {
       last = await window.BLTHouseExtFetchState(houseId);
       if (last && last.house && (prevTs == null || last.ts !== prevTs)) return last.house;
-      await new Promise((r) => setTimeout(r, 400));
+      await new Promise((r) => setTimeout(r, 200));
     }
     return last && last.house ? last.house : null;
   };
