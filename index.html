@@ -872,45 +872,23 @@ function openInteract(ev, name, state){
   pop.style.top=y+'px';
 }
 
-function mergePresence(remote){
-  if(!remote) return presence;
-  const actors = Object.assign({}, (presence && presence.actors) || {});
-  Object.keys(remote.actors || {}).forEach(k=>{
-    const a = remote.actors[k];
-    const cur = actors[k];
-    if(!cur || Number(a.ts||0) >= Number(cur.ts||0)) actors[k] = a;
-  });
-  const now = Date.now();
-  Object.keys(actors).forEach(k=>{
-    if(now - Number(actors[k].ts||0) > 120000) delete actors[k];
-  });
-  const evMap = {};
-  [].concat((presence && presence.events) || [], remote.events || []).forEach(e=>{
-    if(!e) return;
-    evMap[(e.ts||'') + ':' + (e.login||'')] = e;
-  });
-  const events = Object.values(evMap).sort((a,b)=>Number(a.ts||0)-Number(b.ts||0));
-  while(events.length>24) events.shift();
-  presence = { houseId: remote.houseId, ts: remote.ts || now, actors, events };
+function setPresence(remote){
+  if(!remote || typeof remote !== 'object') return presence;
+  presence = {
+    houseId: remote.houseId,
+    ts: remote.ts || Date.now(),
+    rev: remote.rev || remote.ts || 0,
+    actors: remote.actors || {},
+    events: Array.isArray(remote.events) ? remote.events.slice() : [],
+  };
   return presence;
 }
 
-function applyLocalActor(pose, objectName){
-  const u = window.BLTHouseTwitch && window.BLTHouseTwitch.user;
-  if(!u) return;
-  const login = String(u.login||'').toLowerCase();
-  if(!presence.actors) presence.actors = {};
-  if(!presence.events) presence.events = [];
-  const row = {
-    login, display: u.display || login, pose, object: objectName || '', room: currentTab, ts: Date.now()
-  };
-  presence.actors[login] = row;
-  if(pose !== 'here'){
-    presence.events.push({
-      ...row,
-      text: (u.display||login)+' · '+pose+(objectName?' · '+objectName:'')
-    });
-  }
+function newEventId(){
+  try {
+    if (crypto && crypto.randomUUID) return crypto.randomUUID();
+  } catch (e) {}
+  return 'e' + Date.now() + '-' + Math.random().toString(16).slice(2);
 }
 
 async function doFlavor(pose, objectName, kind){
@@ -919,22 +897,32 @@ async function doFlavor(pose, objectName, kind){
     toast('Войди Twitch — атмосфера общая для залогиненных');
     return;
   }
-  applyLocalActor(pose, objectName);
-  renderPresenceOnly();
+  if (window.__bltFlavorBusy) return;
+  window.__bltFlavorBusy = true;
   const me = (window.BLTHouseTwitch.user||{}).display || 'ты';
+  const login = String((window.BLTHouseTwitch.user||{}).login||'').toLowerCase();
+  const eventId = newEventId();
+  // Optimistic: only own chip — лента только с сервера (иначе двойные строки)
+  if (!presence.actors) presence.actors = {};
+  presence.actors[login] = {
+    login, display: me, pose, object: objectName || '', room: currentTab, ts: Date.now()
+  };
+  renderPresenceOnly();
   toast(me+' · '+pose+' · '+objectName);
   setFooter('Атмосфера: '+me+' · '+objectName+' (в игру не ушло)');
   try{
     const data = await window.BLTHouseExtPublishPresence({
-      pose, object: objectName, room: currentTab, text: '',
+      pose, object: objectName, room: currentTab, text: '', eventId, idle: false,
     });
-    mergePresence(data);
+    setPresence(data);
     renderPresenceOnly();
     setSync(true, defaultSyncLabel());
   }catch(e){
     toast(humanQueueError(e));
     setFooter(humanQueueError(e));
     setSync(true, defaultSyncLabel());
+  } finally {
+    window.__bltFlavorBusy = false;
   }
 }
 
@@ -968,12 +956,20 @@ function renderPresenceOnly(){
 
 async function pollPresence(){
   if(!isQueueMode() || typeof window.BLTHouseExtFetchPresence !== 'function') return;
+  if (window.__bltPresencePollBusy) return;
+  window.__bltPresencePollBusy = true;
   const {houseId}=parseRoute();
-  if(!houseId) return;
+  if(!houseId){ window.__bltPresencePollBusy = false; return; }
   try{
     const data=await window.BLTHouseExtFetchPresence(houseId);
-    if(data){ mergePresence(data); renderPresenceOnly(); }
-    if(twitchLoggedIn() && Date.now()-(window.__bltPresenceBeat||0)>25000){
+    if(data && data.ok !== false){
+      // Не затирать свой свежий optimistic-чип более старым poll, пока POST в полёте
+      if (!window.__bltFlavorBusy) {
+        setPresence(data);
+        renderPresenceOnly();
+      }
+    }
+    if(twitchLoggedIn() && Date.now()-(window.__bltPresenceBeat||0)>20000){
       window.__bltPresenceBeat=Date.now();
       const u = window.BLTHouseTwitch.user || {};
       const mine = (presence.actors||{})[String(u.login||'').toLowerCase()];
@@ -982,9 +978,12 @@ async function pollPresence(){
         pose: (mine && mine.pose) || 'here',
         object: (mine && mine.object) || '',
         room: currentTab
-      }).then(d=>{ mergePresence(d); renderPresenceOnly(); }).catch(()=>{});
+      }).then(d=>{
+        if (!window.__bltFlavorBusy) { setPresence(d); renderPresenceOnly(); }
+      }).catch(()=>{});
     }
   }catch(e){}
+  finally { window.__bltPresencePollBusy = false; }
 }
 
 function placePeople(scene, people){
