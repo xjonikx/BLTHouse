@@ -1,4 +1,4 @@
-/* BLTHouse Pages bridge: click → Cloudflare queue → game poll (no Twitch Extension, no chat) */
+/* BLTHouse Pages bridge: click → queue → game; after action pull /state for gold/level */
 (function () {
   const cfg = () => window.BLT_HOUSE_EXT || {};
 
@@ -81,5 +81,29 @@
     throw new Error(errors.join(" | ") || "No queueUrl/ebsUrl in config.js");
   };
 
-  window.BLTHouseExtFetchState = async function () { return null; };
+  /** Public GET /state — filled by game after actions. */
+  window.BLTHouseExtFetchState = async function (houseId) {
+    const base = queueBase();
+    if (!base || !houseId) return null;
+    const res = await fetch(base + "/state?house=" + encodeURIComponent(houseId), { cache: "no-store" });
+    if (!res.ok) return null;
+    const data = await res.json().catch(() => null);
+    return data && data.house ? data.house : null;
+  };
+
+  /** Poll until state revision changes or timeout. */
+  window.BLTHouseExtWaitState = async function (houseId, prevRevision, timeoutMs) {
+    const t0 = Date.now();
+    const limit = timeoutMs || 4000;
+    let last = null;
+    while (Date.now() - t0 < limit) {
+      last = await window.BLTHouseExtFetchState(houseId);
+      if (last) {
+        const rev = last.Revision ?? last.revision ?? 0;
+        if (prevRevision == null || rev !== prevRevision) return last;
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    return last;
+  };
 })();

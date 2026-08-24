@@ -281,9 +281,15 @@ async function fetchHouse(){
   }
   if(viewer) localStorage.setItem('blt_house_viewer', viewer);
 
-  // Queue mode: no snapshots — UI is a remote control, game applies actions.
+  // Queue mode: show remote immediately; if Worker already has state — use it (no hang).
   if(isQueueMode()){
     showApp();
+    if (typeof window.BLTHouseExtFetchState === 'function') {
+      try {
+        const remote = await window.BLTHouseExtFetchState(houseId);
+        if (remote) return remote;
+      } catch (e) { console.warn('state', e); }
+    }
     return queueStub(houseId, viewer);
   }
 
@@ -313,11 +319,26 @@ async function fetchHouse(){
 async function postAction(action, extra={}){
   if (typeof window.BLTHouseExtPublishAction === 'function' && isQueueMode()) {
     try {
+      const prevRev = house ? (house.revision||0) : 0;
+      const {houseId} = parseRoute();
       const pub = await window.BLTHouseExtPublishAction(action, extra);
       toast('Отправлено в игру');
-      setFooter('Очередь: ' + action + ' · без чата');
+      setFooter('Очередь: ' + action);
+      document.getElementById('syncLabel').textContent = 'Ждём ответ…';
+      if (typeof window.BLTHouseExtWaitState === 'function') {
+        const remote = await window.BLTHouseExtWaitState(houseId, prevRev, 5000);
+        if (remote) {
+          house = normalize(remote);
+          renderAll();
+          document.getElementById('syncLabel').textContent = 'Обновлено';
+          setFooter('Золото/уровень из игры');
+          document.getElementById('liveDot').classList.remove('off');
+          return {ok:true, msg:'queue+state', via: pub.via, house:remote};
+        }
+      }
       document.getElementById('syncLabel').textContent = 'Отправлено';
       document.getElementById('liveDot').classList.remove('off');
+      setFooter('В игре применено; снимок ещё не пришёл (проверь QUEUE_SECRET / poll)');
       return {ok:true, msg:'queue', via: pub.via, house:null};
     } catch (e) {
       toast(String(e.message||e));
