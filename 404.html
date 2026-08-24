@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>BLT House</title>
-<script src="config.js"></script>
-<script src="twitch-auth.js"></script>
-<script src="extension-bridge.js"></script>
+<script src="config.js?v=atm2"></script>
+<script src="twitch-auth.js?v=atm2"></script>
+<script src="extension-bridge.js?v=atm2"></script>
 <style>
 :root{
   --bg:#0d0d0c;--panel:#171614;--panel2:#201e19;--panel3:#29251e;
@@ -303,6 +303,9 @@ let pollTimer = null;
 let lastRevision = -1;
 let presence = { actors: {}, events: [] };
 let presenceTimer = null;
+let presenceJoinedAt = 0;
+let seenEventIds = new Set();
+let liveLog = []; // only events that arrived after join (or own optimistic)
 
 function parseRoute(){
   const path = location.pathname || '';
@@ -872,14 +875,52 @@ function openInteract(ev, name, state){
   pop.style.top=y+'px';
 }
 
-function setPresence(remote){
+function setPresence(remote, opts){
+  opts = opts || {};
   if(!remote || typeof remote !== 'object') return presence;
+  if (!presenceJoinedAt) presenceJoinedAt = Date.now();
+
+  const actors = Object.assign({}, presence.actors || {});
+  Object.keys(remote.actors || {}).forEach((k) => {
+    const a = remote.actors[k];
+    const cur = actors[k];
+    if (!cur || Number(a.ts || 0) >= Number(cur.ts || 0)) actors[k] = a;
+  });
+  const now = Date.now();
+  Object.keys(actors).forEach((k) => {
+    if (now - Number(actors[k].ts || 0) > 60000) delete actors[k];
+  });
+
+  // Backlog on first paint: mark ids seen, do NOT dump into live log
+  const seedOnly = opts.seedOnly === true;
+  const incoming = Array.isArray(remote.events) ? remote.events : [];
+  for (const e of incoming) {
+    if (!e) continue;
+    const id = String(e.id || ((e.ts || '') + ':' + (e.login || '')));
+    if (seenEventIds.has(id)) continue;
+    seenEventIds.add(id);
+    if (seedOnly) continue;
+    // Only live: after join (2s grace for clock skew)
+    if (Number(e.ts || 0) + 500 < presenceJoinedAt) continue;
+    liveLog.push({
+      id,
+      text: e.text || ((e.display || e.login || '') + ' · ' + (e.pose || '')),
+      ts: Number(e.ts || now),
+    });
+  }
+  while (liveLog.length > 12) liveLog.shift();
+  while (seenEventIds.size > 80) {
+    const first = seenEventIds.values().next().value;
+    seenEventIds.delete(first);
+  }
+
   presence = {
-    houseId: remote.houseId,
+    houseId: remote.houseId || presence.houseId,
     ts: remote.ts || Date.now(),
-    rev: remote.rev || remote.ts || 0,
-    actors: remote.actors || {},
-    events: Array.isArray(remote.events) ? remote.events.slice() : [],
+    rev: Number(remote.rev || remote.eventRev || presence.rev || 0),
+    eventRev: Number(remote.eventRev || 0),
+    actors,
+    events: incoming,
   };
   return presence;
 }
@@ -902,11 +943,16 @@ async function doFlavor(pose, objectName, kind){
   const me = (window.BLTHouseTwitch.user||{}).display || 'ты';
   const login = String((window.BLTHouseTwitch.user||{}).login||'').toLowerCase();
   const eventId = newEventId();
-  // Optimistic: only own chip — лента только с сервера (иначе двойные строки)
   if (!presence.actors) presence.actors = {};
   presence.actors[login] = {
     login, display: me, pose, object: objectName || '', room: currentTab, ts: Date.now()
   };
+  // Own line immediately (deduped by eventId when server echoes)
+  if (!seenEventIds.has(eventId)) {
+    seenEventIds.add(eventId);
+    liveLog.push({ id: eventId, text: me + ' · ' + pose + (objectName ? ' · ' + objectName : ''), ts: Date.now() });
+    while (liveLog.length > 12) liveLog.shift();
+  }
   renderPresenceOnly();
   toast(me+' · '+pose+' · '+objectName);
   setFooter('Атмосфера: '+me+' · '+objectName+' (в игру не ушло)');
@@ -949,27 +995,30 @@ function renderPresenceOnly(){
   drawPresence(scene);
   const log=document.getElementById('presenceLog');
   if(log){
-    const ev=((presence&&presence.events)||[]).slice(-6).reverse();
-    log.innerHTML = ev.map(e=>esc(e.text||((e.display||e.login)+' · '+(e.pose||'')))).join('<br>') || 'Пока тихо';
+    const ev = liveLog.slice(-6).reverse();
+    log.innerHTML = ev.map(e=>esc(e.text||'')).join('<br>') || 'Пока тихо · видны только новые действия';
   }
 }
 
 async function pollPresenceOnce(){
-  if(!isQueueMode() || typeof window.BLTHouseExtFetchPresence !== 'function') return;
+  if(!isQueueMode() || typeof window.BLTHouseExtPublishPresence !== 'function') return;
   const {houseId}=parseRoute();
   if(!houseId) return;
   try{
-    if(twitchLoggedIn() && Date.now()-(window.__bltPresenceBeat||0)>20000){
+    if(twitchLoggedIn() && Date.now()-(window.__bltPresenceBeat||0)>25000){
       window.__bltPresenceBeat=Date.now();
       const u = window.BLTHouseTwitch.user || {};
       const mine = (presence.actors||{})[String(u.login||'').toLowerCase()];
+      // Heartbeat: keep actor alive only — do not treat as live atmosphere spam
       window.BLTHouseExtPublishPresence({
         idle: true,
         pose: (mine && mine.pose) || 'here',
         object: (mine && mine.object) || '',
         room: currentTab
       }).then(d=>{
-        if (!window.__bltFlavorBusy && d) { setPresence(d); renderPresenceOnly(); }
+        if (!d) return;
+        setPresence(d);
+        renderPresenceOnly();
       }).catch(()=>{});
     }
   }catch(e){}
@@ -978,24 +1027,34 @@ async function pollPresenceOnce(){
 async function presenceLongPollLoop(){
   if (window.__bltPresenceLoop) return;
   window.__bltPresenceLoop = true;
-  let since = Number((presence && presence.rev) || 0);
+  presenceJoinedAt = Date.now();
+  seenEventIds = new Set();
+  liveLog = [];
+  let since = 0;
+  let seeded = false;
   while (window.__bltPresenceLoop) {
     if (!isQueueMode()) { await new Promise(r=>setTimeout(r,1000)); continue; }
     const {houseId}=parseRoute();
     if (!houseId) { await new Promise(r=>setTimeout(r,1000)); continue; }
     try {
-      const data = await window.BLTHouseExtFetchPresence(houseId, { since, wait: 2500 });
+      const wait = seeded ? 2500 : 0;
+      const data = await window.BLTHouseExtFetchPresence(houseId, { since, wait });
       if (data && data.ok !== false) {
-        const rev = Number(data.rev || data.ts || 0);
-        if (!window.__bltFlavorBusy) {
+        if (!seeded) {
+          setPresence(data, { seedOnly: true });
+          seeded = true;
+          renderPresenceOnly();
+        } else {
           setPresence(data);
           renderPresenceOnly();
         }
+        const rev = Number(data.rev || 0);
         if (rev > since) since = rev;
+        else if (!since) since = Number(data.eventRev || data.ts || Date.now());
       }
       await pollPresenceOnce();
     } catch (e) {
-      await new Promise(r=>setTimeout(r, 400));
+      await new Promise(r=>setTimeout(r, 300));
     }
   }
 }
