@@ -8,5 +8,5 @@ window.BLT_HOUSE_EXT = {
   // Twitch Application (OAuth Implicit) — Redirect: https://xjonikx.github.io/BLTHouse/
   // Same value → Cloudflare Worker Variable TWITCH_CLIENT_ID
   twitchClientId: "jikzu97y2o467loo3th2ggw4ihi8xe",
-  twitchRedirectUri: "https://xjonikx.github.io/BLTHouse",
+  twitchRedirectUri: "https://xjonikx.github.io/BLTHouse/",
 };

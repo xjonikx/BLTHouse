@@ -314,7 +314,7 @@ function parseRoute(){
   const m = pathPart.match(/\/house\/([^\/\?#]+)/i) || path.match(/\/house\/([^\/\?#]+)/i);
   return {
     houseId: m ? decodeURIComponent(m[1]) : (qs.get('house') || hqs.get('house') || ''),
-    viewer: qs.get('viewer') || hqs.get('viewer') || localStorage.getItem('blt_house_viewer') || '',
+    viewer: qs.get('viewer') || hqs.get('viewer') || '',
   };
 }
 
@@ -400,25 +400,46 @@ function queueStub(houseId, viewer){
   };
 }
 
+function restoreHouseSearchIfMissing(){
+  const {houseId} = parseRoute();
+  if (houseId) return false;
+  let search = '';
+  try { search = sessionStorage.getItem('blt_house_return') || ''; } catch (e) {}
+  if (!search || search.indexOf('house=') < 0) return false;
+  let path = location.pathname.replace(/404\.html$/i, '');
+  if (!path) path = '/';
+  if (!/index\.html$/i.test(path) && !path.endsWith('/')) path += '/';
+  history.replaceState({}, '', path + (search.charAt(0)==='?' ? search : '?' + search));
+  return true;
+}
+
 async function fetchHouse(){
+  if (typeof window.BLTHouseTwitch?.rememberReturn === 'function') window.BLTHouseTwitch.rememberReturn();
+  restoreHouseSearchIfMissing();
   const {houseId, viewer} = parseRoute();
   if(!houseId){
-    // No stub wall: list known houses from Worker if any
     showApp();
+    let links = '';
     if (typeof window.BLTHouseExtListHouses === 'function') {
       try {
         const list = await window.BLTHouseExtListHouses();
         if (list && list.length) {
-          const pick = list[0];
-          location.search = '?house=' + encodeURIComponent(pick.houseId) + (pick.owner ? '&viewer=' + encodeURIComponent(pick.owner) : '');
-          return null;
+          links = '<div style="margin-top:14px;text-align:left;max-width:420px;margin-left:auto;margin-right:auto">' +
+            list.slice(0, 12).map(h => {
+              const href = '?house=' + encodeURIComponent(h.houseId) + (h.owner ? '&viewer=' + encodeURIComponent(h.owner) : '');
+              return '<div style="margin:6px 0"><a href="'+href+'" style="color:#ead5a4">'+(h.name||h.houseId)+'</a> <small style="color:#9c9588">'+esc(h.owner||'')+'</small></div>';
+            }).join('') + '</div>';
         }
       } catch (e) {}
     }
-    showBoot('Укажите дом', 'Ссылка: .../index.html?house=HOUSE_ID  ·  или !house panel в чате');
+    document.getElementById('bootError').style.display='grid';
+    document.getElementById('app').style.display='none';
+    document.getElementById('bootTitle').textContent='Укажите дом';
+    document.getElementById('bootMsg').innerHTML=
+      'Ссылка: …/index.html?house=HOUSE_ID · или !house panel в чате. После входа в Twitch дом больше не подменяется первым из списка.' + links;
     return null;
   }
-  if(viewer) localStorage.setItem('blt_house_viewer', viewer);
+  if (typeof window.BLTHouseTwitch?.rememberReturn === 'function') window.BLTHouseTwitch.rememberReturn();
 
   if(isQueueMode()){
     showApp();
@@ -851,22 +872,64 @@ function openInteract(ev, name, state){
   pop.style.top=y+'px';
 }
 
+function mergePresence(remote){
+  if(!remote) return presence;
+  const actors = Object.assign({}, (presence && presence.actors) || {});
+  Object.keys(remote.actors || {}).forEach(k=>{
+    const a = remote.actors[k];
+    const cur = actors[k];
+    if(!cur || Number(a.ts||0) >= Number(cur.ts||0)) actors[k] = a;
+  });
+  const now = Date.now();
+  Object.keys(actors).forEach(k=>{
+    if(now - Number(actors[k].ts||0) > 120000) delete actors[k];
+  });
+  const evMap = {};
+  [].concat((presence && presence.events) || [], remote.events || []).forEach(e=>{
+    if(!e) return;
+    evMap[(e.ts||'') + ':' + (e.login||'')] = e;
+  });
+  const events = Object.values(evMap).sort((a,b)=>Number(a.ts||0)-Number(b.ts||0));
+  while(events.length>24) events.shift();
+  presence = { houseId: remote.houseId, ts: remote.ts || now, actors, events };
+  return presence;
+}
+
+function applyLocalActor(pose, objectName){
+  const u = window.BLTHouseTwitch && window.BLTHouseTwitch.user;
+  if(!u) return;
+  const login = String(u.login||'').toLowerCase();
+  if(!presence.actors) presence.actors = {};
+  if(!presence.events) presence.events = [];
+  const row = {
+    login, display: u.display || login, pose, object: objectName || '', room: currentTab, ts: Date.now()
+  };
+  presence.actors[login] = row;
+  if(pose !== 'here'){
+    presence.events.push({
+      ...row,
+      text: (u.display||login)+' · '+pose+(objectName?' · '+objectName:'')
+    });
+  }
+}
+
 async function doFlavor(pose, objectName, kind){
   closeInteract();
   if(!twitchLoggedIn()){
     toast('Войди Twitch — атмосфера общая для залогиненных');
     return;
   }
+  applyLocalActor(pose, objectName);
+  renderPresenceOnly();
+  const me = (window.BLTHouseTwitch.user||{}).display || 'ты';
+  toast(me+' · '+pose+' · '+objectName);
+  setFooter('Атмосфера: '+me+' · '+objectName+' (в игру не ушло)');
   try{
     const data = await window.BLTHouseExtPublishPresence({
-      pose, object: objectName, room: currentTab,
-      text: '',
+      pose, object: objectName, room: currentTab, text: '',
     });
-    if(data) presence = data;
+    mergePresence(data);
     renderPresenceOnly();
-    const me = (window.BLTHouseTwitch.user||{}).display || 'ты';
-    toast(me+' · '+pose+' · '+objectName);
-    setFooter('Атмосфера: '+me+' · '+objectName+' (в игру не ушло)');
     setSync(true, defaultSyncLabel());
   }catch(e){
     toast(humanQueueError(e));
@@ -909,10 +972,16 @@ async function pollPresence(){
   if(!houseId) return;
   try{
     const data=await window.BLTHouseExtFetchPresence(houseId);
-    if(data){ presence=data; renderPresenceOnly(); }
-    if(twitchLoggedIn() && Date.now()-(window.__bltPresenceBeat||0)>14000){
+    if(data){ mergePresence(data); renderPresenceOnly(); }
+    if(twitchLoggedIn() && Date.now()-(window.__bltPresenceBeat||0)>25000){
       window.__bltPresenceBeat=Date.now();
-      window.BLTHouseExtPublishPresence({pose:'here', room:currentTab}).then(d=>{ if(d){ presence=d; renderPresenceOnly(); } }).catch(()=>{});
+      const u = window.BLTHouseTwitch.user || {};
+      const mine = (presence.actors||{})[String(u.login||'').toLowerCase()];
+      window.BLTHouseExtPublishPresence({
+        pose: (mine && mine.pose) || 'here',
+        object: (mine && mine.object) || '',
+        room: currentTab
+      }).then(d=>{ mergePresence(d); renderPresenceOnly(); }).catch(()=>{});
     }
   }catch(e){}
 }
@@ -1168,7 +1237,7 @@ function toggleTwitchAuth(){
         ? 'Гость: кликай объекты — тебя увидят другие. Игра только у владельца.'
         : 'Просмотр · войди Twitch, чтобы участвовать в атмосфере'));
     pollTimer=setInterval(()=>refresh(false), 8000);
-    presenceTimer=setInterval(pollPresence, 2000);
+    presenceTimer=setInterval(pollPresence, 800);
     pollPresence();
   }
 })();
