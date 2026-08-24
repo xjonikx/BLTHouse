@@ -28,7 +28,12 @@
     const text = await res.text();
     let data = {};
     try { data = JSON.parse(text); } catch { /* raw */ }
-    if (!res.ok) throw new Error("queue " + res.status + ": " + text);
+    if (!res.ok) {
+      const err = new Error((data && data.error) || ("queue " + res.status + ": " + text));
+      err.code = data.error || String(res.status);
+      err.body = data;
+      throw err;
+    }
     return { ok: true, via: "queue", data };
   }
 
@@ -113,5 +118,45 @@
     if (!res.ok) return [];
     const data = await res.json().catch(() => null);
     return (data && data.houses) || [];
+  };
+
+  window.BLTHouseExtFetchPresence = async function (houseId, opts) {
+    const base = queueBase();
+    if (!base || !houseId) return null;
+    opts = opts || {};
+    const q = new URLSearchParams();
+    q.set("house", houseId);
+    q.set("_", String(Date.now()));
+    if (opts.since != null) q.set("since", String(opts.since));
+    if (opts.wait != null) q.set("wait", String(opts.wait));
+    const res = await fetch(base + "/presence?" + q.toString(), { cache: "no-store" });
+    if (!res.ok) return null;
+    return await res.json().catch(() => null);
+  };
+
+  window.BLTHouseExtPublishPresence = async function (payload) {
+    const base = queueBase();
+    if (!base) throw new Error("ebsUrl not set");
+    const twitch = window.BLTHouseTwitch || {};
+    if (!twitch.token) throw new Error("login_required");
+    const route = (typeof parseRoute === "function" && parseRoute()) || {};
+    const res = await fetch(base + "/presence", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(Object.assign({
+        houseId: route.houseId || "",
+        twitchToken: twitch.token || "",
+      }, payload || {})),
+    });
+    const text = await res.text();
+    let data = {};
+    try { data = JSON.parse(text); } catch { /* raw */ }
+    if (!res.ok) {
+      const err = new Error(data.error || ("presence " + res.status));
+      err.code = data.error || String(res.status);
+      err.body = data;
+      throw err;
+    }
+    return data;
   };
 })();
