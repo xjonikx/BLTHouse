@@ -3,8 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>BLT House Control Panel (Extension / Pages)</title>
+<title>BLT House</title>
 <script src="config.js"></script>
+<script src="twitch-auth.js"></script>
 <script src="extension-bridge.js"></script>
 <style>
 :root{
@@ -133,6 +134,64 @@ header{
 .error-screen{display:grid;place-items:center;height:100vh;padding:24px;text-align:center}
 @media(max-width:950px){.body{grid-template-columns:1fr 320px}}
 @media(max-width:760px){body{overflow:auto}.app{height:auto;min-height:100vh}.body{display:block}.viewer{height:720px}.side{border-left:0;border-top:1px solid #3c382f}}
+
+/* Visual layer from mobile room demo (look only) */
+:root{
+  --bg:#090b0a;--panel:#141715;--panel2:#1c201c;--panel3:#242921;
+  --line:#4b5147;--line2:#776c50;--gold:#c8a45d;--gold2:#f0dcae;
+  --text:#eee8d9;--muted:#98998f;--green:#86a873;--red:#b56e62;--blue:#7896a7;
+  --shadow:0 18px 55px #000c;
+}
+body{
+  background:radial-gradient(circle at 50% 20%,#3b392f 0,#171a17 42%,#080a09 100%);
+}
+.app{grid-template-rows:76px 48px 1fr 38px}
+header{
+  padding:10px 20px;
+  background:linear-gradient(180deg,#30332d,#171a17 72%,#111310);
+  border-bottom:1px solid #74684c;
+}
+.crest{
+  width:46px;height:46px;border-radius:4px;
+  background:linear-gradient(145deg,#62563c,#25281f);
+  border:1px solid #8a7956;
+}
+.meta-pill{border-radius:3px;background:#111410;border-color:#5b5e50;padding:7px 10px}
+.btn-auth{
+  border:1px solid #8a7956;border-radius:3px;padding:7px 12px;
+  background:linear-gradient(#403b2c,#25271f);color:#f0dcae;font:12px Arial,sans-serif;
+}
+.btn-auth:hover{border-color:#c8a45d}
+.tabs{padding-left:10px;background:linear-gradient(#20241f,#111410)}
+.tab.active{background:linear-gradient(#34372f,#252921)}
+.room-view{
+  border-radius:4px;border-color:#75684c;
+  background:radial-gradient(ellipse at 50% 43%,rgba(121,112,91,.7) 0,rgba(65,66,56,.88) 42%,rgba(28,31,28,.98) 100%);
+}
+.room-view:after{
+  content:"";position:absolute;inset:0;pointer-events:none;z-index:50;
+  box-shadow:inset 0 0 70px #0008, inset 0 0 0 1px #9a8a6655;
+}
+.badge{
+  border-radius:3px;
+  background:linear-gradient(#171a16ed,#0d0f0de8);
+  border-color:#71654b;
+}
+.object{
+  min-width:84px;border-radius:3px;
+  background:linear-gradient(#1c201bd9,#0e100ee8);
+  border-color:#75664a;
+  transition:transform .12s,border-color .12s,box-shadow .12s;
+}
+.object:hover{transform:translateY(-2px);box-shadow:0 7px 18px #000b}
+.object .ico{width:36px;height:36px;object-fit:contain;background:#171612;border:1px solid #524839}
+.side{background:linear-gradient(180deg,#1a1d19,#10130f);border-left-color:#484b42}
+.stat{border-color:#454a40;background:linear-gradient(#252922,#1c201b);border-radius:3px}
+.action{border-radius:3px;background:linear-gradient(#30342d,#20241f)}
+.list-item{border-radius:3px;background:#20241f;border-color:#41463d}
+.list-item .ico{object-fit:contain}
+.footer{background:#0c0f0c}
+.notice.auth{border-left-color:#7694a4}
 </style>
 </head>
 <body>
@@ -148,6 +207,7 @@ header{
   <div class="meta">
     <div class="meta-pill"><span class="live-dot" id="liveDot"></span><span id="syncLabel">Очередь</span></div>
     <div class="meta-pill">💰 <span id="gold">—</span></div>
+    <button type="button" class="btn-auth" id="authBtn" onclick="toggleTwitchAuth()">Войти Twitch</button>
   </div>
 </header>
 <nav class="tabs" id="tabs"></nav>
@@ -171,8 +231,8 @@ header{
   </aside>
 </div>
 <footer class="footer">
-  <span>BLTHouse · House Control Panel</span>
-  <span id="footerState">Очередь · клики без чата</span>
+  <span>BLTHouse</span>
+  <span id="footerState">Просмотр · войди Twitch чтобы управлять своим домом</span>
 </footer>
 </div>
 
@@ -226,6 +286,11 @@ function parseRoute(){
   };
 }
 
+function isOwnerNow(){
+  const t = window.BLTHouseTwitch;
+  return !!(t && t.isOwner && house && t.isOwner(house));
+}
+
 function apiBase(){
   const c = window.BLT_HOUSE_EXT || {};
   if (c.localGameApi) return String(c.localGameApi).replace(/\/$/,'');
@@ -258,7 +323,7 @@ function queueStub(houseId, viewer){
     HouseLevel: 1,
     HouseLevelRoman: 'I',
     StatusText: 'команды уходят в игру через очередь',
-    IsOwnerViewer: true,
+    IsOwnerViewer: false,
     Gold: 0,
     Rooms: [
       {Type:'common', Unlocked:true, Level:1, Description:'Общая'},
@@ -276,12 +341,23 @@ function queueStub(houseId, viewer){
 async function fetchHouse(){
   const {houseId, viewer} = parseRoute();
   if(!houseId){
-    showBoot('Укажите дом', 'Ссылка: .../index.html?house=HOUSE_ID&viewer=Ник');
+    // No stub wall: list known houses from Worker if any
+    showApp();
+    if (typeof window.BLTHouseExtListHouses === 'function') {
+      try {
+        const list = await window.BLTHouseExtListHouses();
+        if (list && list.length) {
+          const pick = list[0];
+          location.search = '?house=' + encodeURIComponent(pick.houseId) + (pick.owner ? '&viewer=' + encodeURIComponent(pick.owner) : '');
+          return null;
+        }
+      } catch (e) {}
+    }
+    showBoot('Укажите дом', 'Ссылка: .../index.html?house=HOUSE_ID  ·  или !house panel в чате');
     return null;
   }
   if(viewer) localStorage.setItem('blt_house_viewer', viewer);
 
-  // Queue mode: last house JSON from Worker, else this tab's sessionStorage, else stub.
   if(isQueueMode()){
     showApp();
     const cacheKey = 'blt_house_last_' + houseId;
@@ -328,10 +404,10 @@ async function fetchHouse(){
 function applyPanelHouse(raw){
   const next = normalize(raw);
   if (isQueueMode()) {
-    const {viewer} = parseRoute();
-    if (viewer) next.isOwnerViewer = true;
+    next.isOwnerViewer = !!(window.BLTHouseTwitch && window.BLTHouseTwitch.isOwner(next));
     if (!next.actions || !next.actions.length) {
-      next.actions = queueStub(next.houseId, viewer).Actions.map(a=>({
+      const r = parseRoute();
+      next.actions = queueStub(next.houseId, r.viewer).Actions.map(a=>({
         id:a.Id, label:a.Label, room:a.Room, cost:a.Cost, available:true
       }));
     }
@@ -343,6 +419,11 @@ async function postAction(action, extra={}){
   if (typeof window.BLTHouseExtPublishAction === 'function' && isQueueMode()) {
     try {
       const {houseId} = parseRoute();
+      if (!isOwnerNow()) {
+        toast('Войди через Twitch как владелец дома');
+        setFooter('Readonly — кнопки только после OAuth владельца');
+        return {ok:false, msg:'readonly'};
+      }
       let prevTs = null;
       try {
         const packed = await window.BLTHouseExtFetchState(houseId);
@@ -591,7 +672,7 @@ function storageCatCount(keys){
 }
 
 function iconUrl(key){
-  return '/assets/icons/'+encodeURIComponent(key||'misc')+'.svg';
+  return 'assets/icons/'+encodeURIComponent(key||'misc')+'.svg';
 }
 function iconKey(type){
   const t=String(type||'').toLowerCase();
@@ -619,7 +700,7 @@ function makeObject(name, state, x, y, icon){
   d.className='object';
   d.style.left=x+'%'; d.style.top=y+'%';
   const src=icon||iconForObject(name);
-  d.innerHTML=`<img class="ico" src="${esc(src)}" alt=""><div>${esc(name)}</div><small>${esc(String(state))}</small>`;
+  d.innerHTML=`<img class="ico" src="${esc(src)}" alt="" onerror="this.src='assets/icons/misc.svg'"><div>${esc(name)}</div><small>${esc(String(state))}</small>`;
   d.onclick=()=>{ setFooter(name+' — '+state); toast(name+': '+state); };
   return d;
 }
@@ -728,8 +809,10 @@ function storageList(){
     const type=it.ItemType||it.itemType||it.Category||it.category||'';
     const cnt=it.Count||it.count||1;
     const icon=it.IconUrl||it.iconUrl||iconUrl(iconKey(type));
-    const src=String(icon).startsWith('/assets/icons/')?icon:iconUrl(iconKey(type));
-    return `<div class="list-item"><img class="ico" src="${esc(src)}" alt=""><div class="txt"><b>${esc(name)}</b><small>×${cnt} · ${esc(type||'item')} · ${esc(id)}</small></div></div>`;
+    let src=String(icon||'');
+    if(src.startsWith('/assets/icons/')) src=src.slice(1);
+    if(!src || src.indexOf('assets/icons/')<0) src=iconUrl(iconKey(type));
+    return `<div class="list-item"><img class="ico" src="${esc(src)}" alt="" onerror="this.src='assets/icons/misc.svg'"><div class="txt"><b>${esc(name)}</b><small>×${cnt} · ${esc(type||'item')}</small></div></div>`;
   }).join('')||'<div class="list-item">Пусто</div>';
 }
 function historyList(){
@@ -753,7 +836,7 @@ function actionsHtml(room){
 }
 
 function onAction(a){
-  if(!house.isOwnerViewer){ toast('Только владелец'); return; }
+  if(!house.isOwnerViewer){ toast('Войди Twitch как владелец'); return; }
   if(!a.available){ toast(a.disabledReason||'Недоступно'); return; }
   // invite needs name
   if(a.id==='invite' || a.id==='rename'){
@@ -834,14 +917,36 @@ async function refresh(force){
   }
 }
 
+function updateAuthUi(){
+  const btn=document.getElementById('authBtn');
+  const t=window.BLTHouseTwitch;
+  if(!btn||!t) return;
+  if(t.user){
+    btn.textContent='⎋ '+t.user.display;
+    btn.title='Выйти';
+  } else {
+    btn.textContent='Войти Twitch';
+    btn.title='OAuth — только владелец может жать кнопки';
+  }
+}
+function toggleTwitchAuth(){
+  const t=window.BLTHouseTwitch;
+  if(!t) return;
+  if(t.user){ t.logout(); updateAuthUi(); if(house){ house=applyPanelHouse(house); renderAll(); } }
+  else t.login();
+}
+
 (async function boot(){
+  if(window.BLTHouseTwitch) await window.BLTHouseTwitch.init();
+  updateAuthUi();
   await refresh(true);
-  // Queue mode: buttons work immediately; gold/level arrive from Worker after the game acts.
   if (!isQueueMode()) {
     pollTimer=setInterval(()=>refresh(false), 2000);
   } else {
-    document.getElementById('syncLabel').textContent='Очередь';
-    setFooter('Клик → Worker → игра → золото на панели');
+    document.getElementById('syncLabel').textContent= isOwnerNow() ? 'Владелец' : 'Просмотр';
+    setFooter(isOwnerNow()
+      ? 'Ты владелец — клики идут в игру'
+      : 'Просмотр · войди Twitch чтобы управлять своим домом');
   }
 })();
 </script>

@@ -1,4 +1,4 @@
-/* BLTHouse Pages bridge: click → queue → game; after action pull /state for gold/level */
+/* BLTHouse Pages: click → Worker queue → game; gold via /state after action */
 (function () {
   const cfg = () => window.BLT_HOUSE_EXT || {};
 
@@ -10,6 +10,7 @@
     const base = queueBase();
     if (!base) throw new Error("ebsUrl/queueUrl not set in config.js");
     const channel = String(cfg().broadcasterId || cfg().channel || "default");
+    const twitch = window.BLTHouseTwitch || {};
     const res = await fetch(base + "/action", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -17,7 +18,8 @@
         channel,
         action: messageObj.action,
         houseId: messageObj.houseId,
-        viewer: messageObj.viewer,
+        viewer: (twitch.user && twitch.user.login) || messageObj.viewer || "",
+        twitchToken: twitch.token || "",
         target: messageObj.target || "",
         value: messageObj.value || "",
         message: messageObj,
@@ -45,13 +47,14 @@
 
   window.BLTHouseExtPublishAction = async function (action, extra) {
     const route = (typeof parseRoute === "function" && parseRoute()) || {};
+    const twitch = window.BLTHouseTwitch || {};
     const messageObj = Object.assign(
       {
         v: 1,
         kind: "action",
         action: action,
         houseId: route.houseId || "",
-        viewer: route.viewer || localStorage.getItem("blt_house_viewer") || "",
+        viewer: (twitch.user && twitch.user.login) || route.viewer || "",
         target: "",
         value: "",
         ts: Math.floor(Date.now() / 1000),
@@ -81,7 +84,6 @@
     throw new Error(errors.join(" | ") || "No queueUrl/ebsUrl in config.js");
   };
 
-  /** Public GET /state — { house, ts } filled by game after actions. */
   window.BLTHouseExtFetchState = async function (houseId) {
     const base = queueBase();
     if (!base || !houseId) return null;
@@ -92,7 +94,6 @@
     return { house: data.house, ts: data.ts || 0 };
   };
 
-  /** Wait until Worker house JSON timestamp changes (not campaign-day revision). */
   window.BLTHouseExtWaitState = async function (houseId, prevTs, timeoutMs) {
     const t0 = Date.now();
     const limit = timeoutMs || 8000;
@@ -103,5 +104,14 @@
       await new Promise((r) => setTimeout(r, 400));
     }
     return last && last.house ? last.house : null;
+  };
+
+  window.BLTHouseExtListHouses = async function () {
+    const base = queueBase();
+    if (!base) return [];
+    const res = await fetch(base + "/houses", { cache: "no-store" });
+    if (!res.ok) return [];
+    const data = await res.json().catch(() => null);
+    return (data && data.houses) || [];
   };
 })();

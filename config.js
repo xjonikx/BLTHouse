@@ -1,14 +1,12 @@
-// GitHub Pages config — NO Twitch Extension secrets.
+// Public Pages config — no secrets here.
 window.BLT_HOUSE_EXT = {
-  // Same numeric channel id as in game (BLT log: Channel ID is …)
   broadcasterId: "475802457",
-
-  // Cloudflare Worker queue URL
   ebsUrl: "https://bannerlord.mountandblade.workers.dev",
-
-  // Optional: local game HTTP while developing
   localGameApi: "",
+  preferQueue: true,
 
-  // Prefer queue over local
-  preferPubSub: true,
+  // Twitch Application (OAuth Implicit) — Redirect: https://xjonikx.github.io/BLTHouse/
+  // Same value → Cloudflare Worker Variable TWITCH_CLIENT_ID
+  twitchClientId: "jikzu97y2o467loo3th2ggw4ihi8xe",
+  twitchRedirectUri: "https://xjonikx.github.io/BLTHouse",
 };
