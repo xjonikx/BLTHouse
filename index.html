@@ -954,21 +954,11 @@ function renderPresenceOnly(){
   }
 }
 
-async function pollPresence(){
+async function pollPresenceOnce(){
   if(!isQueueMode() || typeof window.BLTHouseExtFetchPresence !== 'function') return;
-  if (window.__bltPresencePollBusy) return;
-  window.__bltPresencePollBusy = true;
   const {houseId}=parseRoute();
-  if(!houseId){ window.__bltPresencePollBusy = false; return; }
+  if(!houseId) return;
   try{
-    const data=await window.BLTHouseExtFetchPresence(houseId);
-    if(data && data.ok !== false){
-      // Не затирать свой свежий optimistic-чип более старым poll, пока POST в полёте
-      if (!window.__bltFlavorBusy) {
-        setPresence(data);
-        renderPresenceOnly();
-      }
-    }
     if(twitchLoggedIn() && Date.now()-(window.__bltPresenceBeat||0)>20000){
       window.__bltPresenceBeat=Date.now();
       const u = window.BLTHouseTwitch.user || {};
@@ -979,11 +969,35 @@ async function pollPresence(){
         object: (mine && mine.object) || '',
         room: currentTab
       }).then(d=>{
-        if (!window.__bltFlavorBusy) { setPresence(d); renderPresenceOnly(); }
+        if (!window.__bltFlavorBusy && d) { setPresence(d); renderPresenceOnly(); }
       }).catch(()=>{});
     }
   }catch(e){}
-  finally { window.__bltPresencePollBusy = false; }
+}
+
+async function presenceLongPollLoop(){
+  if (window.__bltPresenceLoop) return;
+  window.__bltPresenceLoop = true;
+  let since = Number((presence && presence.rev) || 0);
+  while (window.__bltPresenceLoop) {
+    if (!isQueueMode()) { await new Promise(r=>setTimeout(r,1000)); continue; }
+    const {houseId}=parseRoute();
+    if (!houseId) { await new Promise(r=>setTimeout(r,1000)); continue; }
+    try {
+      const data = await window.BLTHouseExtFetchPresence(houseId, { since, wait: 2500 });
+      if (data && data.ok !== false) {
+        const rev = Number(data.rev || data.ts || 0);
+        if (!window.__bltFlavorBusy) {
+          setPresence(data);
+          renderPresenceOnly();
+        }
+        if (rev > since) since = rev;
+      }
+      await pollPresenceOnce();
+    } catch (e) {
+      await new Promise(r=>setTimeout(r, 400));
+    }
+  }
 }
 
 function placePeople(scene, people){
@@ -1237,8 +1251,7 @@ function toggleTwitchAuth(){
         ? 'Гость: кликай объекты — тебя увидят другие. Игра только у владельца.'
         : 'Просмотр · войди Twitch, чтобы участвовать в атмосфере'));
     pollTimer=setInterval(()=>refresh(false), 8000);
-    presenceTimer=setInterval(pollPresence, 400);
-    pollPresence();
+    presenceLongPollLoop();
   }
 })();
 </script>

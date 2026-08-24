@@ -120,10 +120,16 @@
     return (data && data.houses) || [];
   };
 
-  window.BLTHouseExtFetchPresence = async function (houseId) {
+  window.BLTHouseExtFetchPresence = async function (houseId, opts) {
     const base = queueBase();
     if (!base || !houseId) return null;
-    const res = await fetch(base + "/presence?house=" + encodeURIComponent(houseId), { cache: "no-store" });
+    opts = opts || {};
+    const q = new URLSearchParams();
+    q.set("house", houseId);
+    q.set("_", String(Date.now()));
+    if (opts.since != null) q.set("since", String(opts.since));
+    if (opts.wait != null) q.set("wait", String(opts.wait));
+    const res = await fetch(base + "/presence?" + q.toString(), { cache: "no-store" });
     if (!res.ok) return null;
     return await res.json().catch(() => null);
   };
