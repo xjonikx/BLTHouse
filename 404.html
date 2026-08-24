@@ -4,9 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>BLT House</title>
-<script src="config.js?v=atm2"></script>
-<script src="twitch-auth.js?v=atm2"></script>
-<script src="extension-bridge.js?v=atm2"></script>
+<script src="config.js?v=rt1"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="twitch-auth.js?v=rt1"></script>
+<script src="extension-bridge.js?v=rt1"></script>
+<script src="presence-realtime.js?v=rt1"></script>
 <style>
 :root{
   --bg:#0d0d0c;--panel:#171614;--panel2:#201e19;--panel3:#29251e;
@@ -932,6 +934,28 @@ function newEventId(){
   return 'e' + Date.now() + '-' + Math.random().toString(16).slice(2);
 }
 
+function useSupabaseAtmosphere(){
+  return !!(window.BLTHouseRealtime && window.BLTHouseRealtime.enabled && window.BLTHouseRealtime.enabled());
+}
+
+function ingestFlavorEvent(e){
+  if (!e) return;
+  const id = String(e.id || ((e.ts || '') + ':' + (e.login || '')));
+  if (seenEventIds.has(id)) return;
+  seenEventIds.add(id);
+  liveLog.push({
+    id,
+    text: e.text || ((e.display || e.login || '') + ' · ' + (e.pose || '')),
+    ts: Number(e.ts || Date.now()),
+  });
+  while (liveLog.length > 12) liveLog.shift();
+}
+
+function applyRealtimeActors(actors){
+  presence.actors = actors || {};
+  presence.ts = Date.now();
+}
+
 async function doFlavor(pose, objectName, kind){
   closeInteract();
   if(!twitchLoggedIn()){
@@ -947,7 +971,6 @@ async function doFlavor(pose, objectName, kind){
   presence.actors[login] = {
     login, display: me, pose, object: objectName || '', room: currentTab, ts: Date.now()
   };
-  // Own line immediately (deduped by eventId when server echoes)
   if (!seenEventIds.has(eventId)) {
     seenEventIds.add(eventId);
     liveLog.push({ id: eventId, text: me + ' · ' + pose + (objectName ? ' · ' + objectName : ''), ts: Date.now() });
@@ -955,14 +978,21 @@ async function doFlavor(pose, objectName, kind){
   }
   renderPresenceOnly();
   toast(me+' · '+pose+' · '+objectName);
-  setFooter('Атмосфера: '+me+' · '+objectName+' (в игру не ушло)');
+  setFooter('Атмосфера: '+me+' · '+objectName+' (realtime)');
   try{
-    const data = await window.BLTHouseExtPublishPresence({
-      pose, object: objectName, room: currentTab, text: '', eventId, idle: false,
-    });
-    setPresence(data);
-    renderPresenceOnly();
-    setSync(true, defaultSyncLabel());
+    if (useSupabaseAtmosphere()) {
+      await window.BLTHouseRealtime.publishFlavor({
+        pose, object: objectName, room: currentTab, text: '', eventId, idle: false,
+      });
+      setSync(true, defaultSyncLabel());
+    } else {
+      const data = await window.BLTHouseExtPublishPresence({
+        pose, object: objectName, room: currentTab, text: '', eventId, idle: false,
+      });
+      setPresence(data);
+      renderPresenceOnly();
+      setSync(true, defaultSyncLabel());
+    }
   }catch(e){
     toast(humanQueueError(e));
     setFooter(humanQueueError(e));
@@ -1288,8 +1318,45 @@ function updateAuthUi(){
 function toggleTwitchAuth(){
   const t=window.BLTHouseTwitch;
   if(!t) return;
-  if(t.user){ t.logout(); updateAuthUi(); if(house){ house=applyPanelHouse(house); renderAll(); } }
-  else t.login();
+  if(t.user){
+    t.logout();
+    updateAuthUi();
+    if (window.BLTHouseRealtime) window.BLTHouseRealtime.disconnect();
+    if(house){ house=applyPanelHouse(house); renderAll(); }
+  } else t.login();
+}
+
+async function startAtmosphere(){
+  presenceJoinedAt = Date.now();
+  seenEventIds = new Set();
+  liveLog = [];
+  const {houseId} = parseRoute();
+  if (!houseId) return;
+
+  if (useSupabaseAtmosphere() && twitchLoggedIn()) {
+    window.__bltPresenceLoop = false;
+    const ok = await window.BLTHouseRealtime.connect(houseId, {
+      onUpdate: (msg) => {
+        if (msg.kind === 'actors') {
+          applyRealtimeActors(msg.actors);
+          renderPresenceOnly();
+        } else if (msg.kind === 'flavor') {
+          ingestFlavorEvent(msg.event);
+          renderPresenceOnly();
+        }
+      },
+    });
+    setSync(true, ok ? (defaultSyncLabel() + ' · live') : defaultSyncLabel());
+    setFooter(ok
+      ? 'Атмосфера: Supabase WebSocket · игра через Cloudflare'
+      : 'Realtime не подключился — проверь supabaseUrl/anon в config.js');
+    return;
+  }
+
+  if (useSupabaseAtmosphere() && !twitchLoggedIn()) {
+    setFooter('Войди Twitch — атмосфера по WebSocket после логина');
+  }
+  presenceLongPollLoop();
 }
 
 (async function boot(){
@@ -1305,12 +1372,12 @@ function toggleTwitchAuth(){
   } else {
     setSync(true, defaultSyncLabel());
     setFooter(isOwnerNow()
-      ? 'Владелец: игра через очередь · атмосфера — общая комната в браузере'
+      ? 'Владелец: игра через очередь · атмосфера realtime после Twitch'
       : (twitchLoggedIn()
-        ? 'Гость: кликай объекты — тебя увидят другие. Игра только у владельца.'
-        : 'Просмотр · войди Twitch, чтобы участвовать в атмосфере'));
+        ? 'Гость: кликай объекты — realtime. Игра только у владельца.'
+        : 'Просмотр · войди Twitch для атмосферы'));
     pollTimer=setInterval(()=>refresh(false), 8000);
-    presenceLongPollLoop();
+    await startAtmosphere();
   }
 })();
 </script>
