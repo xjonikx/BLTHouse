@@ -978,6 +978,7 @@ async function pollPresence(){
       const u = window.BLTHouseTwitch.user || {};
       const mine = (presence.actors||{})[String(u.login||'').toLowerCase()];
       window.BLTHouseExtPublishPresence({
+        idle: true,
         pose: (mine && mine.pose) || 'here',
         object: (mine && mine.object) || '',
         room: currentTab
@@ -1237,7 +1238,7 @@ function toggleTwitchAuth(){
         ? 'Гость: кликай объекты — тебя увидят другие. Игра только у владельца.'
         : 'Просмотр · войди Twitch, чтобы участвовать в атмосфере'));
     pollTimer=setInterval(()=>refresh(false), 8000);
-    presenceTimer=setInterval(pollPresence, 800);
+    presenceTimer=setInterval(pollPresence, 400);
     pollPresence();
   }
 })();
