@@ -3,12 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<base href="/BLTHouse/">
 <title>BLT House</title>
-<script src="config.js?v=rt1"></script>
+<script src="config.js?v=rt3"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="twitch-auth.js?v=rt1"></script>
-<script src="extension-bridge.js?v=rt1"></script>
-<script src="presence-realtime.js?v=rt1"></script>
+<script src="twitch-auth.js?v=rt3"></script>
+<script src="extension-bridge.js?v=rt3"></script>
+<script src="presence-realtime.js?v=rt3"></script>
 <style>
 :root{
   --bg:#0d0d0c;--panel:#171614;--panel2:#201e19;--panel3:#29251e;
@@ -137,7 +138,6 @@ header{
 @media(max-width:950px){.body{grid-template-columns:1fr 320px}}
 @media(max-width:760px){body{overflow:auto}.app{height:auto;min-height:100vh}.body{display:block}.viewer{height:720px}.side{border-left:0;border-top:1px solid #3c382f}}
 
-/* Visual layer from mobile room demo (look only) */
 :root{
   --bg:#090b0a;--panel:#141715;--panel2:#1c201c;--panel3:#242921;
   --line:#4b5147;--line2:#776c50;--gold:#c8a45d;--gold2:#f0dcae;
@@ -208,7 +208,8 @@ header{
 }
 .interact-pop .ip-btns button:hover{border-color:#d0ad6a;color:#f0dfbb}
 .interact-pop .ip-btns button.game{border-color:#6b5c42;color:#ead5a4}
-.interact-pop .tag{font:10px Arial,sans-serif;color:#7694a4;margin-left:6px}
+.interact-pop .ip-cd{margin-top:6px;color:#c5a360;font:11px Arial,sans-serif}
+.interact-pop .ip-btns button:disabled{opacity:.45;cursor:not-allowed}
 .presence-bar{
   position:absolute;z-index:18;left:14px;right:14px;bottom:10px;
   display:flex;flex-wrap:wrap;gap:6px;pointer-events:none;
@@ -307,7 +308,10 @@ let presence = { actors: {}, events: [] };
 let presenceTimer = null;
 let presenceJoinedAt = 0;
 let seenEventIds = new Set();
-let liveLog = []; // only events that arrived after join (or own optimistic)
+let liveLog = [];
+const FLAVOR_CD_MS = 4000;
+let flavorCdUntil = 0;
+let flavorCdTimer = null;
 
 function parseRoute(){
   const path = location.pathname || '';
@@ -584,7 +588,6 @@ async function postAction(action, extra={}){
 }
 
 function normalize(h){
-  // Accept PascalCase from Newtonsoft
   const g = (a,b) => h[a] !== undefined ? h[a] : h[b];
   return {
     houseId: g('HouseId','houseId'),
@@ -769,6 +772,11 @@ function storageCatCount(keys){
 function iconUrl(key){
   return 'assets/icons/'+encodeURIComponent(key||'misc')+'.svg';
 }
+function personIconSrc(p){
+  const u = String((p && (p.portraitUrl || (p.visual && (p.visual.Url || p.visual.url)))) || '');
+  if (u && u.indexOf('/assets/ref/') < 0 && u.indexOf('assets/icons/') >= 0) return u.replace(/^\//,'');
+  return iconUrl('person');
+}
 function iconKey(type){
   const t=String(type||'').toLowerCase();
   if(t.includes('weapon')||t.includes('polearm')||t.includes('bow')||t.includes('инструмент')) return 'weapon';
@@ -843,6 +851,24 @@ function gameLines(kind, name){
   return [];
 }
 
+function flavorCdLeft(){
+  return Math.max(0, flavorCdUntil - Date.now());
+}
+function startFlavorCooldown(){
+  flavorCdUntil = Date.now() + FLAVOR_CD_MS;
+  if (flavorCdTimer) clearInterval(flavorCdTimer);
+  flavorCdTimer = setInterval(()=>{
+    const left = flavorCdLeft();
+    const cd = document.getElementById('ipCd');
+    if (cd) cd.textContent = left > 0 ? ('Подожди ' + (left/1000).toFixed(1) + ' с') : '';
+    const pop = document.getElementById('interactPop');
+    if (pop && pop.classList.contains('show')) {
+      pop.querySelectorAll('.ip-btns button[data-layer="flavor"]').forEach(b=>{ b.disabled = left > 0; });
+    }
+    if (left <= 0) { clearInterval(flavorCdTimer); flavorCdTimer = null; }
+  }, 100);
+}
+
 function closeInteract(){
   const el=document.getElementById('interactPop');
   if(el) el.classList.remove('show');
@@ -852,12 +878,23 @@ function openInteract(ev, name, state){
   const pop=document.getElementById('interactPop');
   const kind=objectKind(name);
   document.getElementById('ipTitle').textContent=name;
-  document.getElementById('ipSub').textContent=String(state||'')+' · атмосфера синхронизируется между игроками';
+  document.getElementById('ipSub').textContent=String(state||'')+' · атмосфера (realtime)';
+  let cdEl = document.getElementById('ipCd');
+  if (!cdEl) {
+    cdEl = document.createElement('div');
+    cdEl.id = 'ipCd';
+    cdEl.className = 'ip-cd';
+    document.getElementById('ipSub').after(cdEl);
+  }
+  const left0 = flavorCdLeft();
+  cdEl.textContent = left0 > 0 ? ('Подожди ' + (left0/1000).toFixed(1) + ' с') : '';
   const btns=document.getElementById('ipBtns');
   btns.innerHTML='';
   flavorLines(kind, name).forEach(f=>{
     const b=document.createElement('button');
     b.type='button';
+    b.dataset.layer='flavor';
+    b.disabled = left0 > 0;
     b.innerHTML=esc(f.label)+'<span class="tag">страница</span>';
     b.onclick=()=>doFlavor(f.pose, name, kind);
     btns.appendChild(b);
@@ -893,7 +930,6 @@ function setPresence(remote, opts){
     if (now - Number(actors[k].ts || 0) > 60000) delete actors[k];
   });
 
-  // Backlog on first paint: mark ids seen, do NOT dump into live log
   const seedOnly = opts.seedOnly === true;
   const incoming = Array.isArray(remote.events) ? remote.events : [];
   for (const e of incoming) {
@@ -902,7 +938,6 @@ function setPresence(remote, opts){
     if (seenEventIds.has(id)) continue;
     seenEventIds.add(id);
     if (seedOnly) continue;
-    // Only live: after join (2s grace for clock skew)
     if (Number(e.ts || 0) + 500 < presenceJoinedAt) continue;
     liveLog.push({
       id,
@@ -962,8 +997,14 @@ async function doFlavor(pose, objectName, kind){
     toast('Войди Twitch — атмосфера общая для залогиненных');
     return;
   }
+  const left = flavorCdLeft();
+  if (left > 0) {
+    toast('Подожди ' + (left/1000).toFixed(1) + ' с');
+    return;
+  }
   if (window.__bltFlavorBusy) return;
   window.__bltFlavorBusy = true;
+  startFlavorCooldown();
   const me = (window.BLTHouseTwitch.user||{}).display || 'ты';
   const login = String((window.BLTHouseTwitch.user||{}).login||'').toLowerCase();
   const eventId = newEventId();
@@ -1039,7 +1080,6 @@ async function pollPresenceOnce(){
       window.__bltPresenceBeat=Date.now();
       const u = window.BLTHouseTwitch.user || {};
       const mine = (presence.actors||{})[String(u.login||'').toLowerCase()];
-      // Heartbeat: keep actor alive only — do not treat as live atmosphere spam
       window.BLTHouseExtPublishPresence({
         idle: true,
         pose: (mine && mine.pose) || 'here',
@@ -1181,7 +1221,10 @@ function projectHtml(){
 }
 
 function peopleList(arr){
-  return (arr||[]).map(p=>`<div class="list-item"><img class="ico" src="${iconUrl('person')}" alt=""><div class="txt"><b>${esc(p.name)}</b> — ${esc(p.role||'')}<small>${esc(p.state||'')} · ${esc(p.culture||'')} · ${p.age||'?'} лет</small></div></div>`).join('');
+  return (arr||[]).map(p=>{
+    const src = personIconSrc(p);
+    return `<div class="list-item"><img class="ico" src="${esc(src)}" alt="" onerror="this.onerror=null;this.src='${esc(iconUrl('person'))}'"><div class="txt"><b>${esc(p.name)}</b> — ${esc(p.role||'')}<small>${esc(p.state||'')} · ${esc(p.culture||'')} · ${p.age||'?'} лет</small></div></div>`;
+  }).join('');
 }
 function yardList(){
   const a=[];
@@ -1225,7 +1268,6 @@ function actionsHtml(room){
 function onAction(a){
   if(!house.isOwnerViewer){ toast('Войди Twitch как владелец'); return; }
   if(!a.available){ toast(a.disabledReason||'Недоступно'); return; }
-  // invite needs name
   if(a.id==='invite' || a.id==='rename'){
     openPrompt(a);
     return;

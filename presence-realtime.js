@@ -17,7 +17,7 @@
     if (client) return client;
     const c = cfg();
     client = window.supabase.createClient(c.supabaseUrl, c.supabaseAnonKey, {
-      realtime: { params: { eventsPerSecond: 20 } },
+      realtime: { params: { eventsPerSecond: 40 } },
     });
     return client;
   }
@@ -124,14 +124,30 @@
         id: payload.eventId || payload.id || ("e" + Date.now()),
       }, payload || {});
 
-      await channel.track({
-        login,
-        display,
-        pose: row.pose,
-        object: row.object || "",
-        room: row.room || "",
-        ts: row.ts,
-      });
+      // Presence.track is rate-limited to ~5 calls / 30s per client on Free.
+      // Do NOT track on every click — only broadcast. Track sparsely for "who's here".
+      const now = Date.now();
+      const shouldTrack =
+        payload.idle === true ||
+        !this._lastTrackAt ||
+        now - this._lastTrackAt > 8000 ||
+        this._lastTrackPose !== row.pose;
+      if (shouldTrack) {
+        this._lastTrackAt = now;
+        this._lastTrackPose = row.pose;
+        try {
+          await channel.track({
+            login,
+            display,
+            pose: row.pose,
+            object: row.object || "",
+            room: row.room || "",
+            ts: row.ts,
+          });
+        } catch (e) {
+          /* presence throttle — broadcast still OK */
+        }
+      }
 
       if (payload.idle === true || row.pose === "here") {
         emitActors();
