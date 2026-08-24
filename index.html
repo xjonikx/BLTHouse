@@ -240,15 +240,20 @@ async function fetchHouse(){
   }
   if(viewer) localStorage.setItem('blt_house_viewer', viewer);
 
-  // On GitHub Pages without localGameApi: wait for Extension PubSub state (Twitch.ext.listen)
+  // GitHub Pages: try Worker state snapshot, else stub (clicks still go to queue)
   if(!apiBase()){
-    showBoot('Ждём снимок дома', 'Открой панель как Twitch Extension или укажи localGameApi в config.js для чтения с игры. Клики уже идут через PubSub.');
+    if (typeof window.BLTHouseExtFetchState === 'function') {
+      try {
+        const remote = await window.BLTHouseExtFetchState(houseId);
+        if (remote) return remote;
+      } catch (e) { console.warn('queue state', e); }
+    }
     showApp();
-    return { HouseId: houseId, DisplayName: 'Дом (ожидание PubSub)', IsOwnerViewer: true, Rooms: [], Residents: [], Guests: [], Actions: [
+    return { HouseId: houseId, DisplayName: 'Дом (ожидание снимка)', IsOwnerViewer: true, Rooms: [], Residents: [], Guests: [], Actions: [
       {Id:'upgrade_house', Label:'Улучшить дом', Room:'common', Available:true},
       {Id:'upgrade_forge', Label:'Улучшить кузницу', Room:'workshop', Available:true},
       {Id:'expand_storage', Label:'Склад +', Room:'storage', Available:true},
-    ], StatusText: 'PubSub mode' };
+    ], StatusText: 'Queue mode — клики без чата' };
   }
 
   const url = `${apiBase()}/api/house/${encodeURIComponent(houseId)}?viewer=${encodeURIComponent(viewer||'')}`;
@@ -270,17 +275,22 @@ async function fetchHouse(){
 }
 
 async function postAction(action, extra={}){
-  // Primary path: Extension PubSub (ebs worker / helix / local ingest)
-  if (typeof window.BLTHouseExtPublishAction === 'function' && ((window.BLT_HOUSE_EXT||{}).ebsUrl || (window.BLT_HOUSE_EXT||{}).extensionSecret || (window.BLT_HOUSE_EXT||{}).preferPubSub)) {
+  // Primary: Cloudflare queue (no chat). Then refresh state from Worker if possible.
+  if (typeof window.BLTHouseExtPublishAction === 'function' && ((window.BLT_HOUSE_EXT||{}).ebsUrl || (window.BLT_HOUSE_EXT||{}).queueUrl)) {
     try {
       const pub = await window.BLTHouseExtPublishAction(action, extra);
-      toast('Отправлено в PubSub ('+(pub.via||'?')+')');
-      setFooter('PubSub: '+action);
-      // Local API can still refresh if available
+      toast('В очередь ('+(pub.via||'queue')+')');
+      setFooter('Queue: '+action);
+      await new Promise(r => setTimeout(r, 1200));
+      if (typeof window.BLTHouseExtFetchState === 'function') {
+        const {houseId} = parseRoute();
+        const remote = await window.BLTHouseExtFetchState(houseId);
+        if (remote) { house = normalize(remote); renderAll(); }
+      }
       if (apiBase()) await refresh(true);
-      return {ok:true, msg:'pubsub', house:null};
+      return {ok:true, msg:'queue', house:null};
     } catch (e) {
-      console.warn('pubsub publish failed, fallback http', e);
+      console.warn('queue publish failed, fallback http', e);
       if (!apiBase()) {
         toast(String(e.message||e));
         setFooter(String(e.message||e));
