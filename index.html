@@ -281,15 +281,24 @@ async function fetchHouse(){
   }
   if(viewer) localStorage.setItem('blt_house_viewer', viewer);
 
-  // Queue mode: show remote immediately; if Worker already has state — use it (no hang).
+  // Queue mode: last house JSON from Worker, else this tab's sessionStorage, else stub.
   if(isQueueMode()){
     showApp();
+    const cacheKey = 'blt_house_last_' + houseId;
     if (typeof window.BLTHouseExtFetchState === 'function') {
       try {
-        const remote = await window.BLTHouseExtFetchState(houseId);
-        if (remote) return remote;
+        const packed = await window.BLTHouseExtFetchState(houseId);
+        const remote = packed && packed.house ? packed.house : null;
+        if (remote) {
+          try { sessionStorage.setItem(cacheKey, JSON.stringify(remote)); } catch(e) {}
+          return remote;
+        }
       } catch (e) { console.warn('state', e); }
     }
+    try {
+      const cached = sessionStorage.getItem(cacheKey);
+      if (cached) return JSON.parse(cached);
+    } catch (e) {}
     return queueStub(houseId, viewer);
   }
 
@@ -316,29 +325,44 @@ async function fetchHouse(){
   return await r.json();
 }
 
+function applyPanelHouse(raw){
+  const next = normalize(raw);
+  if (isQueueMode()) {
+    const {viewer} = parseRoute();
+    if (viewer) next.isOwnerViewer = true;
+    if (!next.actions || !next.actions.length) {
+      next.actions = queueStub(next.houseId, viewer).Actions.map(a=>({
+        id:a.Id, label:a.Label, room:a.Room, cost:a.Cost, available:true
+      }));
+    }
+  }
+  return next;
+}
+
 async function postAction(action, extra={}){
   if (typeof window.BLTHouseExtPublishAction === 'function' && isQueueMode()) {
     try {
-      const prevRev = house ? (house.revision||0) : 0;
       const {houseId} = parseRoute();
+      let prevTs = null;
+      try {
+        const packed = await window.BLTHouseExtFetchState(houseId);
+        if (packed) prevTs = packed.ts;
+      } catch (e) {}
       const pub = await window.BLTHouseExtPublishAction(action, extra);
-      toast('Отправлено в игру');
+      toast('В очередь');
       setFooter('Очередь: ' + action);
-      document.getElementById('syncLabel').textContent = 'Ждём ответ…';
+      document.getElementById('syncLabel').textContent = 'В очереди';
+      document.getElementById('liveDot').classList.remove('off');
       if (typeof window.BLTHouseExtWaitState === 'function') {
-        const remote = await window.BLTHouseExtWaitState(houseId, prevRev, 5000);
-        if (remote) {
-          house = normalize(remote);
+        window.BLTHouseExtWaitState(houseId, prevTs, 10000).then(remote => {
+          if (!remote) return;
+          house = applyPanelHouse(remote);
+          try { sessionStorage.setItem('blt_house_last_' + houseId, JSON.stringify(remote)); } catch(e) {}
           renderAll();
           document.getElementById('syncLabel').textContent = 'Обновлено';
           setFooter('Золото/уровень из игры');
-          document.getElementById('liveDot').classList.remove('off');
-          return {ok:true, msg:'queue+state', via: pub.via, house:remote};
-        }
+        }).catch(()=>{});
       }
-      document.getElementById('syncLabel').textContent = 'Отправлено';
-      document.getElementById('liveDot').classList.remove('off');
-      setFooter('В игре применено; снимок ещё не пришёл (проверь QUEUE_SECRET / poll)');
       return {ok:true, msg:'queue', via: pub.via, house:null};
     } catch (e) {
       toast(String(e.message||e));
@@ -792,7 +816,7 @@ async function refresh(force){
   try{
     const raw=await fetchHouse();
     if(!raw) return;
-    const next=normalize(raw);
+    const next=isQueueMode()?applyPanelHouse(raw):normalize(raw);
     if(!force && next.revision===lastRevision && house){
       document.getElementById('liveDot').classList.remove('off');
       document.getElementById('syncLabel').textContent='Синхронизировано';
@@ -812,12 +836,12 @@ async function refresh(force){
 
 (async function boot(){
   await refresh(true);
-  // Queue mode: no snapshot polling — panel is a remote control only.
+  // Queue mode: buttons work immediately; gold/level arrive from Worker after the game acts.
   if (!isQueueMode()) {
     pollTimer=setInterval(()=>refresh(false), 2000);
   } else {
     document.getElementById('syncLabel').textContent='Очередь';
-    setFooter('Кнопки → Worker → игра · без чата · без снимков');
+    setFooter('Клик → Worker → игра → золото на панели');
   }
 })();
 </script>

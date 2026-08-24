@@ -81,29 +81,27 @@
     throw new Error(errors.join(" | ") || "No queueUrl/ebsUrl in config.js");
   };
 
-  /** Public GET /state — filled by game after actions. */
+  /** Public GET /state — { house, ts } filled by game after actions. */
   window.BLTHouseExtFetchState = async function (houseId) {
     const base = queueBase();
     if (!base || !houseId) return null;
     const res = await fetch(base + "/state?house=" + encodeURIComponent(houseId), { cache: "no-store" });
     if (!res.ok) return null;
     const data = await res.json().catch(() => null);
-    return data && data.house ? data.house : null;
+    if (!data || !data.house) return null;
+    return { house: data.house, ts: data.ts || 0 };
   };
 
-  /** Poll until state revision changes or timeout. */
-  window.BLTHouseExtWaitState = async function (houseId, prevRevision, timeoutMs) {
+  /** Wait until Worker house JSON timestamp changes (not campaign-day revision). */
+  window.BLTHouseExtWaitState = async function (houseId, prevTs, timeoutMs) {
     const t0 = Date.now();
-    const limit = timeoutMs || 4000;
+    const limit = timeoutMs || 8000;
     let last = null;
     while (Date.now() - t0 < limit) {
       last = await window.BLTHouseExtFetchState(houseId);
-      if (last) {
-        const rev = last.Revision ?? last.revision ?? 0;
-        if (prevRevision == null || rev !== prevRevision) return last;
-      }
-      await new Promise((r) => setTimeout(r, 500));
+      if (last && last.house && (prevTs == null || last.ts !== prevTs)) return last.house;
+      await new Promise((r) => setTimeout(r, 400));
     }
-    return last;
+    return last && last.house ? last.house : null;
   };
 })();
