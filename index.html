@@ -192,6 +192,31 @@ header{
 .list-item .ico{object-fit:contain}
 .footer{background:#0c0f0c}
 .notice.auth{border-left-color:#7694a4}
+.interact-pop{
+  position:fixed;z-index:90;min-width:240px;max-width:300px;
+  padding:10px;border:1px solid #6c5c44;background:#141410f2;
+  box-shadow:0 12px 28px #000c;display:none;
+}
+.interact-pop.show{display:block}
+.interact-pop .ip-title{color:#eee0bf;font-size:14px}
+.interact-pop .ip-sub{margin:4px 0 8px;color:#9c9588;font:11px Arial,sans-serif}
+.interact-pop .ip-btns{display:flex;flex-direction:column;gap:6px}
+.interact-pop .ip-btns button{
+  text-align:left;padding:7px 9px;border:1px solid #5b513f;background:#1c1a16;color:#d8cbb1;font:12px Arial,sans-serif;
+}
+.interact-pop .ip-btns button:hover{border-color:#d0ad6a;color:#f0dfbb}
+.interact-pop .ip-btns button.game{border-color:#6b5c42;color:#ead5a4}
+.interact-pop .tag{font:10px Arial,sans-serif;color:#7694a4;margin-left:6px}
+.presence-bar{
+  position:absolute;z-index:18;left:14px;right:14px;bottom:10px;
+  display:flex;flex-wrap:wrap;gap:6px;pointer-events:none;
+}
+.presence-chip{
+  padding:4px 8px;background:#141410e8;border:1px solid #63563f;color:#d1c5ad;
+  font:11px Arial,sans-serif;box-shadow:0 2px 8px #0008;
+}
+.presence-log{margin-top:8px;font:11px Arial,sans-serif;color:#9c9588;line-height:1.4;max-height:72px;overflow:auto}
+.btn-sell{margin-left:auto;font:11px Arial,sans-serif;padding:4px 8px;border:1px solid #5b513f;background:#1c1a16;color:#ead5a4}
 </style>
 </head>
 <body>
@@ -205,7 +230,7 @@ header{
     </div>
   </div>
   <div class="meta">
-    <div class="meta-pill"><span class="live-dot" id="liveDot"></span><span id="syncLabel">Очередь</span></div>
+    <div class="meta-pill"><span class="live-dot" id="liveDot"></span><span id="syncLabel">Онлайн</span></div>
     <div class="meta-pill">💰 <span id="gold">—</span></div>
     <button type="button" class="btn-auth" id="authBtn" onclick="toggleTwitchAuth()">Войти Twitch</button>
   </div>
@@ -255,6 +280,11 @@ header{
   </div>
 </div>
 <div class="toast" id="toast"></div>
+<div class="interact-pop" id="interactPop">
+  <div class="ip-title" id="ipTitle"></div>
+  <div class="ip-sub" id="ipSub"></div>
+  <div class="ip-btns" id="ipBtns"></div>
+</div>
 
 <script>
 const TAB_DEFS = [
@@ -271,6 +301,8 @@ let currentTab = 'common';
 let pendingAction = null;
 let pollTimer = null;
 let lastRevision = -1;
+let presence = { actors: {}, events: [] };
+let presenceTimer = null;
 
 function parseRoute(){
   const path = location.pathname || '';
@@ -289,6 +321,31 @@ function parseRoute(){
 function isOwnerNow(){
   const t = window.BLTHouseTwitch;
   return !!(t && t.isOwner && house && t.isOwner(house));
+}
+function twitchLoggedIn(){
+  const t = window.BLTHouseTwitch;
+  return !!(t && t.user && t.token);
+}
+function setSync(ok, label){
+  const dot = document.getElementById('liveDot');
+  const lab = document.getElementById('syncLabel');
+  if (!dot || !lab) return;
+  if (ok) dot.classList.remove('off'); else dot.classList.add('off');
+  lab.textContent = label;
+}
+function defaultSyncLabel(){
+  if (isOwnerNow()) return 'Владелец';
+  if (twitchLoggedIn()) return 'Гость';
+  return 'Просмотр';
+}
+function humanQueueError(e){
+  const code = e && e.code;
+  if (code === 'login_required')
+    return 'Twitch на Worker не подтвердился. В Cloudflare нужен TWITCH_CLIENT_ID = config.js, затем Save and Deploy.';
+  if (code === 'not_owner')
+    return 'Игровые действия только у владельца дома. Атмосфера доступна после входа.';
+  if (code === 'rate limit') return 'Слишком часто — подожди секунду.';
+  return String((e && e.message) || e || 'сбой');
 }
 
 function apiBase(){
@@ -312,6 +369,11 @@ function queueStub(houseId, viewer){
     {Id:'expand_storage', Label:'Расширить склад', Room:'storage', Available:true},
     {Id:'unlock_guest_room', Label:'Гостевая комната', Room:'family', Available:true},
     {Id:'expand_family', Label:'Места для семьи', Room:'family', Available:true},
+    {Id:'inventory', Label:'Посмотреть склад', Room:'storage', Available:true},
+    {Id:'buy_grain', Label:'Купить зерно', Room:'storage', Cost:80, Available:true},
+    {Id:'buy_iron', Label:'Купить железо', Room:'storage', Cost:120, Available:true},
+    {Id:'buy_hardwood', Label:'Купить древесину', Room:'storage', Cost:100, Available:true},
+    {Id:'craft_tools', Label:'Скрафтить инструменты', Room:'workshop', Available:true},
   ];
   return {
     HouseId: houseId,
@@ -420,9 +482,10 @@ async function postAction(action, extra={}){
     try {
       const {houseId} = parseRoute();
       if (!isOwnerNow()) {
-        toast('Войди через Twitch как владелец дома');
-        setFooter('Readonly — кнопки только после OAuth владельца');
-        return {ok:false, msg:'readonly'};
+        toast('Игровые кнопки — только владельцу. Войди Twitch тем же ником, что в BLT.');
+        setFooter('Атмосфера: любой залогиненный · игра: владелец');
+        setSync(true, defaultSyncLabel());
+        return {ok:false, msg:'not_owner'};
       }
       let prevTs = null;
       try {
@@ -430,27 +493,32 @@ async function postAction(action, extra={}){
         if (packed) prevTs = packed.ts;
       } catch (e) {}
       const pub = await window.BLTHouseExtPublishAction(action, extra);
-      toast('В очередь');
-      setFooter('Очередь: ' + action);
-      document.getElementById('syncLabel').textContent = 'В очереди';
-      document.getElementById('liveDot').classList.remove('off');
+      toast('В очередь игры');
+      setFooter('Игра ← ' + action);
+      setSync(true, 'В очереди');
       if (typeof window.BLTHouseExtWaitState === 'function') {
         window.BLTHouseExtWaitState(houseId, prevTs, 10000).then(remote => {
-          if (!remote) return;
+          if (!remote) { setSync(true, defaultSyncLabel()); return; }
           house = applyPanelHouse(remote);
           try { sessionStorage.setItem('blt_house_last_' + houseId, JSON.stringify(remote)); } catch(e) {}
           renderAll();
-          document.getElementById('syncLabel').textContent = 'Обновлено';
-          setFooter('Золото/уровень из игры');
-        }).catch(()=>{});
+          setSync(true, defaultSyncLabel());
+          setFooter('Состояние из игры');
+        }).catch(()=> setSync(true, defaultSyncLabel()));
       }
       return {ok:true, msg:'queue', via: pub.via, house:null};
     } catch (e) {
-      toast(String(e.message||e));
-      setFooter(String(e.message||e));
-      document.getElementById('liveDot').classList.add('off');
-      document.getElementById('syncLabel').textContent = 'Ошибка';
-      return {ok:false, msg:String(e.message||e)};
+      const msg = humanQueueError(e);
+      toast(msg);
+      setFooter(msg);
+      if (e && e.code === 'not_owner') {
+        setSync(true, defaultSyncLabel());
+      } else if (e && e.code === 'login_required') {
+        setSync(true, defaultSyncLabel());
+      } else {
+        setSync(false, 'Сбой очереди');
+      }
+      return {ok:false, msg};
     }
   }
 
@@ -614,6 +682,7 @@ function renderScene(){
     buildSceneContent(scene, currentTab);
   }
   canvas.appendChild(scene);
+  drawPresence(scene);
   const labels={common:'Общая комната',family:'Семейная зона',workshop:'Мастерская',yard:'Двор',storage:'Хранилище',history:'История'};
   document.getElementById('sceneBadge').textContent=
     `${labels[currentTab]||currentTab} · ${house.residentsCount||0} жильцов · ${house.guestsCount||0} гостей`;
@@ -701,8 +770,151 @@ function makeObject(name, state, x, y, icon){
   d.style.left=x+'%'; d.style.top=y+'%';
   const src=icon||iconForObject(name);
   d.innerHTML=`<img class="ico" src="${esc(src)}" alt="" onerror="this.src='assets/icons/misc.svg'"><div>${esc(name)}</div><small>${esc(String(state))}</small>`;
-  d.onclick=()=>{ setFooter(name+' — '+state); toast(name+': '+state); };
+  d.onclick=(ev)=>{ ev.stopPropagation(); openInteract(ev, name, state); };
   return d;
+}
+
+function objectKind(name){
+  const t=String(name||'').toLowerCase();
+  if(t.includes('камин')||t.includes('fire')) return 'fireplace';
+  if(t.includes('стол')||t.includes('table')) return 'table';
+  if(t.includes('сундук')||t.includes('chest')||t.includes('хран')) return 'chest';
+  if(t.includes('кроват')||t.includes('bed')) return 'bed';
+  if(t.includes('кузн')||t.includes('forge')) return 'forge';
+  if(t.includes('конюш')||t.includes('stable')) return 'stable';
+  if(t.includes('окно')||t.includes('window')) return 'window';
+  if(t.includes('материал')||t.includes('material')||t.includes('железо')||t.includes('дерев')) return 'material';
+  if(t.includes('еда')||t.includes('food')||t.includes('зерн')) return 'food';
+  return 'misc';
+}
+
+function flavorLines(kind, name){
+  const map={
+    table:[{pose:'sit', label:'Сесть за стол'},{pose:'stand', label:'Встать'}],
+    fireplace:[{pose:'inspect', label:'Осмотреть камин'},{pose:'warm', label:'Погреться'}],
+    bed:[{pose:'rest', label:'Прилечь'},{pose:'stand', label:'Встать'}],
+    chest:[{pose:'peek', label:'Заглянуть (без игры)'}],
+    forge:[{pose:'watch', label:'Смотреть на огонь'}],
+    stable:[{pose:'pat', label:'Погладить'}],
+    window:[{pose:'look', label:'Смотреть в окно'}],
+    material:[{pose:'sort', label:'Перебрать запасы'}],
+    food:[{pose:'smell', label:'Понюхать припасы'}],
+    misc:[{pose:'look', label:'Осмотреть'}],
+  };
+  return map[kind]||map.misc;
+}
+
+function gameLines(kind, name){
+  if(!isOwnerNow()) return [];
+  if(kind==='chest' || kind==='misc' && currentTab==='storage')
+    return [{id:'inventory', label:'Инвентарь (игра)'}];
+  if(kind==='forge')
+    return [{id:'craft_tools', label:'Скрафтить инструменты'}];
+  if(kind==='food')
+    return [{id:'buy_grain', label:'Купить зерно'},{id:'buy_butter', label:'Купить масло'}];
+  if(kind==='material')
+    return [{id:'buy_iron', label:'Купить железо'},{id:'buy_hardwood', label:'Купить древесину'}];
+  return [];
+}
+
+function closeInteract(){
+  const el=document.getElementById('interactPop');
+  if(el) el.classList.remove('show');
+}
+
+function openInteract(ev, name, state){
+  const pop=document.getElementById('interactPop');
+  const kind=objectKind(name);
+  document.getElementById('ipTitle').textContent=name;
+  document.getElementById('ipSub').textContent=String(state||'')+' · атмосфера синхронизируется между игроками';
+  const btns=document.getElementById('ipBtns');
+  btns.innerHTML='';
+  flavorLines(kind, name).forEach(f=>{
+    const b=document.createElement('button');
+    b.type='button';
+    b.innerHTML=esc(f.label)+'<span class="tag">страница</span>';
+    b.onclick=()=>doFlavor(f.pose, name, kind);
+    btns.appendChild(b);
+  });
+  gameLines(kind, name).forEach(g=>{
+    const b=document.createElement('button');
+    b.type='button';
+    b.className='game';
+    b.innerHTML=esc(g.label)+'<span class="tag">игра</span>';
+    b.onclick=()=>{ closeInteract(); postAction(g.id); };
+    btns.appendChild(b);
+  });
+  pop.classList.add('show');
+  const x=Math.min(window.innerWidth-310, Math.max(8, ev.clientX+8));
+  const y=Math.min(window.innerHeight-220, Math.max(8, ev.clientY+8));
+  pop.style.left=x+'px';
+  pop.style.top=y+'px';
+}
+
+async function doFlavor(pose, objectName, kind){
+  closeInteract();
+  if(!twitchLoggedIn()){
+    toast('Войди Twitch — атмосфера общая для залогиненных');
+    return;
+  }
+  try{
+    const data = await window.BLTHouseExtPublishPresence({
+      pose, object: objectName, room: currentTab,
+      text: '',
+    });
+    if(data) presence = data;
+    renderPresenceOnly();
+    const me = (window.BLTHouseTwitch.user||{}).display || 'ты';
+    toast(me+' · '+pose+' · '+objectName);
+    setFooter('Атмосфера: '+me+' · '+objectName+' (в игру не ушло)');
+    setSync(true, defaultSyncLabel());
+  }catch(e){
+    toast(humanQueueError(e));
+    setFooter(humanQueueError(e));
+    setSync(true, defaultSyncLabel());
+  }
+}
+
+function drawPresence(scene){
+  const bar=document.createElement('div');
+  bar.className='presence-bar';
+  const actors=Object.values((presence&&presence.actors)||{});
+  if(!actors.length){
+    bar.innerHTML='<div class="presence-chip">В комнате пока никого из панели</div>';
+  } else {
+    bar.innerHTML=actors.map(a=>{
+      const bit=[a.display||a.login, a.pose, a.object].filter(Boolean).join(' · ');
+      return `<div class="presence-chip">${esc(bit)}</div>`;
+    }).join('');
+  }
+  scene.appendChild(bar);
+}
+
+function renderPresenceOnly(){
+  const scene=document.querySelector('.scene.active');
+  if(!scene) return;
+  const old=scene.querySelector('.presence-bar');
+  if(old) old.remove();
+  drawPresence(scene);
+  const log=document.getElementById('presenceLog');
+  if(log){
+    const ev=((presence&&presence.events)||[]).slice(-6).reverse();
+    log.innerHTML = ev.map(e=>esc(e.text||((e.display||e.login)+' · '+(e.pose||'')))).join('<br>') || 'Пока тихо';
+  }
+}
+
+async function pollPresence(){
+  if(!isQueueMode() || typeof window.BLTHouseExtFetchPresence !== 'function') return;
+  const {houseId}=parseRoute();
+  if(!houseId) return;
+  try{
+    const data=await window.BLTHouseExtFetchPresence(houseId);
+    if(data){ presence=data; renderPresenceOnly(); }
+    if(twitchLoggedIn() && Date.now()-(window.__bltPresenceBeat||0)>14000){
+      window.__bltPresenceBeat=Date.now();
+      window.BLTHouseExtPublishPresence({pose:'here', room:currentTab}).then(d=>{ if(d){ presence=d; renderPresenceOnly(); } }).catch(()=>{});
+    }
+  }catch(e){}
 }
 
 function placePeople(scene, people){
@@ -755,7 +967,9 @@ function renderSide(){
         <div class="stat"><span>ХРАНИЛИЩЕ</span><b>${house.storageUsed||0}/${house.storageCapacity||0}</b></div>
       </div>
       ${projectHtml()}
-      <div style="margin-top:12px" class="kicker">Действия</div><div class="btns">${actionsHtml('common')}</div>`;
+      <div style="margin-top:12px" class="kicker">Кто в панели</div>
+      <div class="presence-log" id="presenceLog">Залогинься Twitch, чтобы тебя видели другие</div>
+      <div style="margin-top:12px" class="kicker">Действия игры</div><div class="btns">${actionsHtml('common')}</div>`;
   } else if(currentTab==='family'){
     html=`<div class="kicker">Жильцы</div><div class="list">${peopleList(house.residents)}</div>
       <div style="margin-top:12px" class="kicker">Гости</div><div class="list">${peopleList(house.guests)||'<div class="list-item">Нет гостей</div>'}</div>
@@ -777,7 +991,8 @@ function renderSide(){
       <div class="progress"><i style="width:${pct}%"></i></div>
       <div style="margin-top:12px" class="kicker">Предметы</div>
       <div class="list">${storageList()}</div>
-      <div style="margin-top:12px" class="btns">${actionsHtml('storage')}</div>`;
+      <div style="margin-top:12px" class="kicker">Торговец (игра, владелец)</div>
+      <div class="btns">${actionsHtml('storage')}</div>`;
   } else if(currentTab==='history'){
     html=`<div class="kicker">История</div><div class="list">${historyList()}</div>
       <div style="margin-top:12px" class="btns">${actionsHtml('history')}</div>`;
@@ -812,7 +1027,7 @@ function storageList(){
     let src=String(icon||'');
     if(src.startsWith('/assets/icons/')) src=src.slice(1);
     if(!src || src.indexOf('assets/icons/')<0) src=iconUrl(iconKey(type));
-    return `<div class="list-item"><img class="ico" src="${esc(src)}" alt="" onerror="this.src='assets/icons/misc.svg'"><div class="txt"><b>${esc(name)}</b><small>×${cnt} · ${esc(type||'item')}</small></div></div>`;
+    return `<div class="list-item"><img class="ico" src="${esc(src)}" alt="" onerror="this.src='assets/icons/misc.svg'"><div class="txt"><b>${esc(name)}</b><small>×${cnt} · ${esc(type||'item')}</small></div>${house.isOwnerViewer&&id?`<button type="button" class="btn-sell" onclick="postAction('sell_item',{target:${JSON.stringify(id)}})">Продать</button>`:''}</div>`;
   }).join('')||'<div class="list-item">Пусто</div>';
 }
 function historyList(){
@@ -893,6 +1108,7 @@ function renderAll(){
   renderTabs();
   renderScene();
   renderSide();
+  renderPresenceOnly();
 }
 
 async function refresh(force){
@@ -901,19 +1117,17 @@ async function refresh(force){
     if(!raw) return;
     const next=isQueueMode()?applyPanelHouse(raw):normalize(raw);
     if(!force && next.revision===lastRevision && house){
-      document.getElementById('liveDot').classList.remove('off');
-      document.getElementById('syncLabel').textContent='Синхронизировано';
+      setSync(true, defaultSyncLabel());
       return;
     }
     lastRevision=next.revision;
     house=next;
-    document.getElementById('liveDot').classList.remove('off');
-    document.getElementById('syncLabel').textContent='Синхронизировано';
+    setSync(true, defaultSyncLabel());
     renderAll();
+    renderPresenceOnly();
   }catch(e){
-    document.getElementById('liveDot').classList.add('off');
-    document.getElementById('syncLabel').textContent='Нет связи';
-    setFooter('Ошибка: '+e.message);
+    setSync(true, defaultSyncLabel());
+    setFooter('Нет свежего /state — показан последний снимок');
   }
 }
 
@@ -926,7 +1140,7 @@ function updateAuthUi(){
     btn.title='Выйти';
   } else {
     btn.textContent='Войти Twitch';
-    btn.title='OAuth — только владелец может жать кнопки';
+    btn.title='OAuth: атмосфера для любого логина, игра — владельцу дома';
   }
 }
 function toggleTwitchAuth(){
@@ -937,16 +1151,25 @@ function toggleTwitchAuth(){
 }
 
 (async function boot(){
+  document.addEventListener('click', (e)=>{
+    const pop=document.getElementById('interactPop');
+    if(pop && !pop.contains(e.target) && !e.target.closest('.object')) closeInteract();
+  });
   if(window.BLTHouseTwitch) await window.BLTHouseTwitch.init();
   updateAuthUi();
   await refresh(true);
   if (!isQueueMode()) {
     pollTimer=setInterval(()=>refresh(false), 2000);
   } else {
-    document.getElementById('syncLabel').textContent= isOwnerNow() ? 'Владелец' : 'Просмотр';
+    setSync(true, defaultSyncLabel());
     setFooter(isOwnerNow()
-      ? 'Ты владелец — клики идут в игру'
-      : 'Просмотр · войди Twitch чтобы управлять своим домом');
+      ? 'Владелец: игра через очередь · атмосфера — общая комната в браузере'
+      : (twitchLoggedIn()
+        ? 'Гость: кликай объекты — тебя увидят другие. Игра только у владельца.'
+        : 'Просмотр · войди Twitch, чтобы участвовать в атмосфере'));
+    pollTimer=setInterval(()=>refresh(false), 8000);
+    presenceTimer=setInterval(pollPresence, 2000);
+    pollPresence();
   }
 })();
 </script>
