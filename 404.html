@@ -5,12 +5,12 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <base href="/BLTHouse/">
 <title>BLT House</title>
-<script src="config.js?v=rt18"></script>
+<script src="config.js?v=rt19"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="supabase-queue.js?v=rt18"></script>
-<script src="twitch-auth.js?v=rt18"></script>
-<script src="extension-bridge.js?v=rt18"></script>
-<script src="presence-realtime.js?v=rt18"></script>
+<script src="supabase-queue.js?v=rt19"></script>
+<script src="twitch-auth.js?v=rt19"></script>
+<script src="extension-bridge.js?v=rt19"></script>
+<script src="presence-realtime.js?v=rt19"></script>
 <style>
 :root{
   --bg:#0d0d0c;--panel:#171614;--panel2:#201e19;--panel3:#29251e;
@@ -595,6 +595,27 @@ let layoutPublishTimer = null;
 let layoutReadyFromServer = false;
 let lastStateTs = 0;
 let refreshSeq = 0;
+let _renderPending = false;
+
+function purgeFatHouseCache(){
+  try {
+    for (let i = sessionStorage.length - 1; i >= 0; i--) {
+      const k = sessionStorage.key(i);
+      if (!k || k.indexOf('blt_house_last_') !== 0) continue;
+      const v = sessionStorage.getItem(k);
+      if (v && v.length > 120000) sessionStorage.removeItem(k);
+    }
+  } catch (e) {}
+}
+
+function scheduleRenderAll(){
+  if (_renderPending) return;
+  _renderPending = true;
+  requestAnimationFrame(() => {
+    _renderPending = false;
+    renderAll();
+  });
+}
 try { visualPositions = JSON.parse(localStorage.getItem('blt_house_visual_positions') || '{}') || {}; } catch (e) { visualPositions = {}; }
 let lastInteractPos = null;
 
@@ -812,6 +833,10 @@ function slimHouseJson(raw){
     const o = Object.assign({}, raw || {});
     o.ShopItems = [];
     o.shopItems = [];
+    if (Array.isArray(o.StorageItems) && o.StorageItems.length > 90) o.StorageItems = o.StorageItems.slice(0, 90);
+    if (Array.isArray(o.storageItems) && o.storageItems.length > 90) o.storageItems = o.storageItems.slice(0, 90);
+    if (Array.isArray(o.HeroInventory) && o.HeroInventory.length > 90) o.HeroInventory = o.HeroInventory.slice(0, 90);
+    if (Array.isArray(o.heroInventory) && o.heroInventory.length > 90) o.heroInventory = o.heroInventory.slice(0, 90);
     return JSON.stringify(o);
   } catch (e) {
     return '{}';
@@ -903,7 +928,7 @@ async function postAction(action, extra={}){
           if (!remote) { refreshGameStatusUi(); toast('Игра не ответила — проверь, что мод запущен'); return; }
           applyHouseIfNewer(remote, null);
           try { sessionStorage.setItem('blt_house_last_' + houseId, slimHouseJson(remote)); } catch(e) {}
-          renderAll();
+          scheduleRenderAll();
           const msg = remote.statusText || remote.StatusText || '';
           if (msg && msg !== 'функционирует нормально') toast(msg);
           refreshGameStatusUi();
@@ -2811,7 +2836,7 @@ async function refresh(force){
           raw = packed.house;
           packedTs = Number(packed.ts || 0) || 0;
           noteGameTs(packedTs);
-          try { sessionStorage.setItem('blt_house_last_' + houseId, JSON.stringify(raw)); } catch(e) {}
+          try { sessionStorage.setItem('blt_house_last_' + houseId, slimHouseJson(raw)); } catch(e) {}
         }
       } catch (e) {}
     }
@@ -2827,7 +2852,7 @@ async function refresh(force){
       return;
     }
     refreshGameStatusUi();
-    renderAll();
+    scheduleRenderAll();
     renderPresenceOnly();
   }catch(e){
     refreshGameStatusUi();
@@ -2907,6 +2932,7 @@ async function startAtmosphere(){
   setupSceneTools();
   if(window.BLTHouseTwitch) await window.BLTHouseTwitch.init();
   updateAuthUi();
+  purgeFatHouseCache();
   await refresh(true);
   if (!gameStatusTimer) gameStatusTimer = setInterval(() => refreshGameStatusUi(), 5000);
   if (!isQueueMode()) {
@@ -2929,12 +2955,11 @@ async function startAtmosphere(){
             return;
           }
           refreshGameStatusUi();
-          renderAll();
+          scheduleRenderAll();
           renderPresenceOnly();
         },
       });
-      // Rare backup GET — live updates come from Realtime postgres_changes
-      pollTimer=setInterval(()=>refresh(false), 20000);
+      // State sync = subscribeState poll (6s). No Realtime — legacy fat rows froze the tab.
     } else {
       pollTimer=setInterval(()=>refresh(false), 3000);
     }

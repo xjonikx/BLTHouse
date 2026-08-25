@@ -1,4 +1,4 @@
-/* BLT House: Pages ↔ Supabase Postgres/Realtime (preferred over Cloudflare Worker poll). */
+/* BLT House: Pages ↔ Supabase Postgres (poll-only state — no Realtime fat JSON parse). */
 (function () {
   const cfg = () => window.BLT_HOUSE_EXT || {};
 
@@ -8,9 +8,9 @@
   }
 
   let client = null;
-  let stateChannel = null;
-  let stateHouseId = "";
   let stateHandlers = null;
+  let stateHouseId = "";
+  let statePollTimer = null;
   let lastStateRow = null;
 
   function getClient() {
@@ -18,7 +18,7 @@
     if (client) return client;
     const c = cfg();
     client = window.supabase.createClient(c.supabaseUrl, c.supabaseAnonKey, {
-      realtime: { params: { eventsPerSecond: 20 } },
+      realtime: { params: { eventsPerSecond: 8 } },
     });
     return client;
   }
@@ -72,17 +72,54 @@
     return out;
   }
 
-  function neuterShopInHouseObj(h) {
+  /** Drop megabyte legacy arrays before JSON.parse; normal shop pages (≤~160 items) pass through. */
+  function stripHeavyStateJson(text) {
+    let out = String(text || "");
+    if (out.length > 100000) {
+      out = stripJsonArrayField(out, "ShopItems");
+      out = stripJsonArrayField(out, "shopItems");
+    }
+    if (out.length > 280000) {
+      out = stripJsonArrayField(out, "StorageItems");
+      out = stripJsonArrayField(out, "storageItems");
+      out = stripJsonArrayField(out, "HeroInventory");
+      out = stripJsonArrayField(out, "heroInventory");
+      out = stripJsonArrayField(out, "History");
+      out = stripJsonArrayField(out, "history");
+    }
+    return out;
+  }
+
+  const ARRAY_CAPS = {
+    ShopItems: 180,
+    shopItems: 180,
+    StorageItems: 90,
+    storageItems: 90,
+    StorageGoods: 90,
+    storageGoods: 90,
+    HeroInventory: 90,
+    heroInventory: 90,
+    History: 35,
+    history: 35,
+  };
+
+  function capArray(arr, max) {
+    if (!Array.isArray(arr)) return arr;
+    return arr.length > max ? arr.slice(0, max) : arr;
+  }
+
+  function neuterHouseInPlace(h) {
     if (!h || typeof h !== "object") return h;
-    if (Array.isArray(h.ShopItems) && h.ShopItems.length > 160) h.ShopItems = h.ShopItems.slice(0, 160);
-    if (Array.isArray(h.shopItems) && h.shopItems.length > 160) h.shopItems = h.shopItems.slice(0, 160);
+    for (const key of Object.keys(ARRAY_CAPS)) {
+      if (Array.isArray(h[key])) h[key] = capArray(h[key], ARRAY_CAPS[key]);
+    }
     return h;
   }
 
   function neuterShopInRow(row) {
     if (!row) return row;
-    if (row.owner_house) neuterShopInHouseObj(row.owner_house);
-    if (row.public_house) neuterShopInHouseObj(row.public_house);
+    if (row.owner_house) neuterHouseInPlace(row.owner_house);
+    if (row.public_house) neuterHouseInPlace(row.public_house);
     return row;
   }
 
@@ -96,6 +133,7 @@
       ? (row.owner_house || row.public_house)
       : (row.public_house || row.owner_house);
     if (!house) return null;
+    neuterHouseInPlace(house);
     return {
       house,
       ts: Number(row.ts || 0) || 0,
@@ -104,16 +142,7 @@
     };
   }
 
-  function emitState(row) {
-    lastStateRow = row;
-    if (!stateHandlers || !stateHandlers.onState) return;
-    const twitch = window.BLTHouseTwitch || {};
-    const viewer = (twitch.user && twitch.user.login) || "";
-    const packed = pickHouseFromRow(row, viewer);
-    if (packed) stateHandlers.onState(packed);
-  }
-
-  /** Raw REST fetch + strip bloated ShopItems before JSON.parse (fixes hang on old Supabase rows). */
+  /** Raw REST fetch + strip bloated arrays BEFORE JSON.parse (fixes hang on old Supabase rows). */
   async function fetchStateRaw(houseId, viewer) {
     const c = cfg();
     if (!c.supabaseUrl || !c.supabaseAnonKey || !houseId) return null;
@@ -133,9 +162,7 @@
     if (!res.ok) return null;
     let text = await res.text();
     if (!text || text === "[]" || text === "null") return null;
-    if (text.length > 120000) {
-      text = stripJsonArrayField(stripJsonArrayField(text, "ShopItems"), "shopItems");
-    }
+    text = stripHeavyStateJson(text);
     let rows;
     try {
       rows = JSON.parse(text);
@@ -144,6 +171,7 @@
       return null;
     }
     const row = Array.isArray(rows) ? rows[0] : rows;
+    lastStateRow = row;
     return pickHouseFromRow(row, viewer);
   }
 
@@ -210,50 +238,44 @@
           if (actionId && String(packed.lastActionId || "") === String(actionId)) return packed.house;
           if (!actionId && (prevTs == null || packed.ts !== prevTs)) return packed.house;
         }
-        await new Promise((r) => setTimeout(r, 400));
+        await new Promise((r) => setTimeout(r, 450));
       }
       return last && last.house ? last.house : null;
     },
 
+    /**
+     * Poll-only state sync. Realtime postgres_changes was removed — it JSON.parsed
+     * multi-MB legacy ShopItems rows and froze / crashed the browser tab.
+     */
     async subscribeState(houseId, handlers) {
       await this.unsubscribeState();
       stateHandlers = handlers || null;
       stateHouseId = houseId || "";
-      const sb = getClient();
-      if (!sb || !stateHouseId) return false;
+      if (!stateHouseId) return false;
+
+      const twitch = window.BLTHouseTwitch || {};
+      const viewer = (twitch.user && twitch.user.login) || "";
 
       try {
-        const twitch = window.BLTHouseTwitch || {};
-        const packed = await this.fetchState(stateHouseId, (twitch.user && twitch.user.login) || "");
+        const packed = await fetchStateRaw(stateHouseId, viewer);
         if (packed && handlers && handlers.onState) handlers.onState(packed);
       } catch (e) {}
 
-      stateChannel = sb
-        .channel("blt-house-state:" + stateHouseId)
-        .on(
-          "postgres_changes",
-          { event: "*", schema: "public", table: "blt_house_state", filter: "house_id=eq." + stateHouseId },
-          (payload) => {
-            const row = payload.new || payload.record || null;
-            if (row) emitState(row);
-          }
-        );
+      statePollTimer = setInterval(async () => {
+        if (!stateHouseId || !stateHandlers || !stateHandlers.onState) return;
+        try {
+          const packed = await fetchStateRaw(stateHouseId, viewer);
+          if (packed) stateHandlers.onState(packed);
+        } catch (e) {}
+      }, 6000);
 
-      await new Promise((resolve) => {
-        stateChannel.subscribe((status) => {
-          if (status === "SUBSCRIBED") resolve(true);
-          if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") resolve(false);
-        });
-      });
       return true;
     },
 
     async unsubscribeState() {
-      if (stateChannel) {
-        try {
-          await stateChannel.unsubscribe();
-        } catch (e) {}
-        stateChannel = null;
+      if (statePollTimer) {
+        clearInterval(statePollTimer);
+        statePollTimer = null;
       }
       stateHouseId = "";
     },
