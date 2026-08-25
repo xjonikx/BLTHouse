@@ -5,12 +5,12 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <base href="/BLTHouse/">
 <title>BLT House</title>
-<script src="config.js?v=rt12"></script>
+<script src="config.js?v=rt14"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="supabase-queue.js?v=rt12"></script>
-<script src="twitch-auth.js?v=rt12"></script>
-<script src="extension-bridge.js?v=rt12"></script>
-<script src="presence-realtime.js?v=rt12"></script>
+<script src="supabase-queue.js?v=rt14"></script>
+<script src="twitch-auth.js?v=rt14"></script>
+<script src="extension-bridge.js?v=rt14"></script>
+<script src="presence-realtime.js?v=rt14"></script>
 <style>
 :root{
   --bg:#0d0d0c;--panel:#171614;--panel2:#201e19;--panel3:#29251e;
@@ -42,6 +42,11 @@ header{
 .meta-pill{padding:8px 10px;border:1px solid #5b513f;background:#171612;color:#d2c7b1}
 .live-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#7fa26f;box-shadow:0 0 8px #7fa26f;margin-right:7px}
 .live-dot.off{background:#a96f64;box-shadow:0 0 8px #a96f64}
+.btn-inspect{font-size:11px;padding:4px 8px;border:1px solid #6a5a40;background:#2a261e;color:#d8c9a8;border-radius:4px;cursor:pointer}
+.btn-inspect:hover{border-color:#c5a360;color:#ead5a4}
+.inspect-grid{display:grid;grid-template-columns:auto 1fr;gap:6px 12px;font-size:13px;margin-top:8px}
+.inspect-grid b{color:#9c9588;font-weight:500}
+.inspect-grid span{color:#e8e0cf}
 .tabs{display:flex;background:linear-gradient(#27231d,#171613);border-bottom:1px solid #433d31;overflow:auto}
 .tab{
   min-width:122px;border:0;border-right:1px solid #413a2f;padding:0 17px;background:transparent;color:#9e9688;position:relative;
@@ -312,6 +317,27 @@ header{
   background:
     radial-gradient(ellipse at 50% 25%,#5d5849 0,#3c3b32 33%,#20231f 65%,#10120f 100%);
 }
+.mobile-room.yard-outdoor{
+  background:linear-gradient(180deg,#5b8fb5 0%,#8eb8d0 22%,#c5d6b0 38%,#7a9a48 40%,#4a6b2e 72%,#2f451c 100%);
+}
+.mobile-room.yard-outdoor:before,
+.mobile-room.yard-outdoor .mobile-backwall,
+.mobile-room.yard-outdoor .mobile-beam,
+.mobile-room.yard-outdoor .mobile-rug{display:none!important}
+.mobile-room.yard-outdoor .mobile-floor{
+  position:absolute;left:-8%;right:-8%;top:40%;bottom:-12%;
+  background:
+    radial-gradient(ellipse at 30% 40%,#6f9440aa 0%,transparent 45%),
+    radial-gradient(ellipse at 70% 60%,#557a32aa 0%,transparent 40%),
+    linear-gradient(180deg,#6b8f3e,#456828 55%,#2f451c);
+  transform:none;transform-origin:50% 0%;
+  border-top:2px solid #8fa85a;box-shadow:none;
+}
+.yard-flower{
+  position:absolute;z-index:8;width:26px;height:26px;object-fit:contain;
+  pointer-events:none;filter:drop-shadow(0 2px 3px #0007);
+  image-rendering:auto;
+}
 .mobile-room:before{
   content:"";position:absolute;left:4%;right:4%;top:5%;height:39%;
   background:
@@ -549,9 +575,14 @@ let presenceTimer = null;
 let presenceJoinedAt = 0;
 let seenEventIds = new Set();
 let liveLog = [];
-const FLAVOR_CD_MS = 4000;
+const FLAVOR_CD_MS = 1200;
+const WALK_CD_MS = 700;
 let flavorCdUntil = 0;
+let walkCdUntil = 0;
 let flavorCdTimer = null;
+let lastGameTs = 0;
+const GAME_OFFLINE_MS = 90000;
+let gameStatusTimer = null;
 let sceneMode = 'inspect';
 let dragState = null;
 let selectedSceneEntity = null;
@@ -595,6 +626,26 @@ function setSync(ok, label){
   if (ok) dot.classList.remove('off'); else dot.classList.add('off');
   lab.textContent = label;
 }
+function noteGameTs(ts){
+  const n = Number(ts || 0) || 0;
+  if (n > lastGameTs) lastGameTs = n;
+}
+function isGameOnline(){
+  if (!lastGameTs) return false;
+  // ts from game is unix ms
+  const age = Date.now() - lastGameTs;
+  return age >= 0 && age < GAME_OFFLINE_MS;
+}
+function refreshGameStatusUi(forceLabel){
+  const online = isGameOnline();
+  if (forceLabel) {
+    setSync(online, forceLabel);
+    return;
+  }
+  let base = defaultSyncLabel();
+  const game = online ? 'игра онлайн' : 'игра оффлайн';
+  setSync(online, base + ' · ' + game);
+}
 function defaultSyncLabel(){
   if (isOwnerNow()) return 'Владелец';
   if (twitchLoggedIn()) return 'Гость';
@@ -622,7 +673,7 @@ function useSupabaseQueue(){
 
 function isQueueMode(){
   const c = window.BLT_HOUSE_EXT || {};
-  return !apiBase() && !!(c.ebsUrl || c.queueUrl || (c.supabaseUrl && c.supabaseAnonKey));
+  return !apiBase() && !!(c.supabaseUrl && c.supabaseAnonKey);
 }
 
 function queueStub(houseId, viewer){
@@ -730,7 +781,7 @@ async function fetchHouse(){
   }
 
   if(!apiBase()){
-    showBoot('Нет связи', 'Укажи supabaseUrl+supabaseAnonKey или ebsUrl в config.js (или localGameApi).');
+    showBoot('Нет связи', 'Укажи supabaseUrl+supabaseAnonKey в config.js (или localGameApi).');
     return null;
   }
 
@@ -780,14 +831,28 @@ async function postAction(action, extra={}){
       if (!isOwnerNow()) {
         toast('Игровые кнопки — только владельцу. Войди Twitch тем же ником, что в BLT.');
         setFooter('Онлайн');
-        setSync(true, defaultSyncLabel());
+        refreshGameStatusUi();
         return {ok:false, msg:'not_owner'};
+      }
+      if (!isGameOnline()) {
+        toast('Игра оффлайн — команды в очередь не ставятся');
+        setFooter('Игра оффлайн');
+        refreshGameStatusUi();
+        return {ok:false, msg:'game_offline'};
       }
       let prevTs = null;
       try {
         const packed = await window.BLTHouseExtFetchState(houseId, parseRoute().viewer);
-        if (packed) prevTs = packed.ts;
+        if (packed) {
+          prevTs = packed.ts;
+          noteGameTs(packed.ts);
+        }
       } catch (e) {}
+      if (!isGameOnline()) {
+        toast('Игра оффлайн — команды в очередь не ставятся');
+        refreshGameStatusUi();
+        return {ok:false, msg:'game_offline'};
+      }
       const pub = await window.BLTHouseExtPublishAction(action, extra);
       const actionId = (pub && (pub.actionId || (pub.data && pub.data.queued))) || (extra && (extra.id || extra.actionId)) || '';
       toast('В очередь игры');
@@ -795,15 +860,15 @@ async function postAction(action, extra={}){
       setSync(true, 'В очереди');
       if (typeof window.BLTHouseExtWaitState === 'function') {
         window.BLTHouseExtWaitState(houseId, { prevTs, actionId, timeoutMs: 8000, viewer: parseRoute().viewer }).then(remote => {
-          if (!remote) { setSync(true, defaultSyncLabel()); toast('Игра не ответила — проверь, что мод запущен'); return; }
+          if (!remote) { refreshGameStatusUi(); toast('Игра не ответила — проверь, что мод запущен'); return; }
           applyHouseIfNewer(remote, null);
           try { sessionStorage.setItem('blt_house_last_' + houseId, JSON.stringify(remote)); } catch(e) {}
           renderAll();
           const msg = remote.statusText || remote.StatusText || '';
           if (msg && msg !== 'функционирует нормально') toast(msg);
-          setSync(true, defaultSyncLabel());
+          refreshGameStatusUi();
           setFooter(msg || 'Состояние из игры');
-        }).catch(()=> setSync(true, defaultSyncLabel()));
+        }).catch(()=> refreshGameStatusUi());
       }
       return {ok:true, msg:'queue', via: pub.via, house:null, actionId};
     } catch (e) {
@@ -811,9 +876,9 @@ async function postAction(action, extra={}){
       toast(msg);
       setFooter(msg);
       if (e && e.code === 'not_owner') {
-        setSync(true, defaultSyncLabel());
+        refreshGameStatusUi();
       } else if (e && e.code === 'login_required') {
-        setSync(true, defaultSyncLabel());
+        refreshGameStatusUi();
       } else {
         setSync(false, 'Сбой очереди');
       }
@@ -1220,14 +1285,14 @@ function bindRoomFloorClick(room){
 }
 async function walkToPoint(x, y){
   if (!twitchLoggedIn()) { toast('Войди Twitch — перемещение видно другим'); return; }
-  const left = flavorCdLeft();
+  const left = Math.max(flavorCdLeft(), walkCdLeft());
   if (left > 0) {
     toast('Подожди ' + (left/1000).toFixed(1) + ' с');
     return;
   }
   if (window.__bltFlavorBusy) return;
   window.__bltFlavorBusy = true;
-  startFlavorCooldown();
+  startWalkCooldown();
   closeInteract();
   try {
     const pos = { x: Math.max(4, Math.min(92, x)), y: Math.max(8, Math.min(88, y)) };
@@ -1257,7 +1322,7 @@ async function walkToPoint(x, y){
       try {
         await publishPresenceDual({ idle: true, pose: 'here', room: currentTab, x: pos.x, y: pos.y });
       } catch (e) {}
-    }, 700);
+    }, 350);
   } finally {
     window.__bltFlavorBusy = false;
   }
@@ -1388,8 +1453,11 @@ function renderScene(){
     scene.appendChild(lock);
   } else {
     const room=document.createElement('div');
-    room.className='mobile-room';
-    room.innerHTML='<div class="mobile-backwall"></div><div class="mobile-beam"></div><div class="mobile-floor"></div><div class="mobile-rug"></div>';
+    const isYard = tabIsYard(currentTab);
+    room.className = isYard ? 'mobile-room yard-outdoor' : 'mobile-room';
+    room.innerHTML = isYard
+      ? '<div class="mobile-floor"></div>'
+      : '<div class="mobile-backwall"></div><div class="mobile-beam"></div><div class="mobile-floor"></div><div class="mobile-rug"></div>';
     buildSceneContent(room, currentTab);
     bindRoomFloorClick(room);
     const tip=document.createElement('div');
@@ -1424,11 +1492,11 @@ function buildSceneContent(scene, tab){
     makeObject(scene, 'Стойка', 'инструменты', 70, 30, iconUrl('weapon'));
     placePeople(scene, (house.residents||[]).slice(0,1));
   } else if(tab==='yard'){
-    makeObject(scene, 'Конюшня '+(house.stableLevel?roman(house.stableLevel):'—'), (house.mountsCount||0)+' маунтов', 12, 35, iconUrl('stable'));
-    (house.pets||[]).forEach((p,i)=>makeObject(scene, p.Name||p.name||'Питомец', p.State||p.state||'', 45+i*8, 49+i*5, iconUrl('pet')));
-    (house.mounts||[]).forEach((m,i)=>makeObject(scene, m.Name||m.name||'Маунт', m.Bond||m.bond||'', 60+i*5, 40+i*6, iconUrl('horse')));
-    if(!(house.pets||[]).length && !(house.mounts||[]).length)
-      makeObject(scene, 'Пустой двор', 'заведите животных', 50, 55, iconUrl('stable'));
+    // Outdoor only: ground+sky (CSS), stable/animals, decorative flowers — no indoor «общее» furniture.
+    placeYardFlowers(scene);
+    makeObject(scene, 'Конюшня '+(house.stableLevel?roman(house.stableLevel):'—'), (house.mountsCount||0)+' маунтов', 12, 52, iconUrl('stable'));
+    (house.pets||[]).forEach((p,i)=>makeObject(scene, p.Name||p.name||'Питомец', p.State||p.state||'', 45+i*8, 58+i*4, iconUrl('pet')));
+    (house.mounts||[]).forEach((m,i)=>makeObject(scene, m.Name||m.name||'Маунт', m.Bond||m.bond||'', 60+i*5, 50+i*5, iconUrl('horse')));
   } else if(tab==='shop'){
     makeObject(scene, 'Рынок', house.shopSettlementName||house.locationName||'—', 20, 40, iconUrl('misc'));
     makeObject(scene, 'Товары', String((house.shopItems||[]).length)+' поз.', 55, 48, iconUrl('chest'));
@@ -1455,6 +1523,23 @@ function storageCatCount(keys){
 
 function iconUrl(key){
   return 'assets/icons/'+encodeURIComponent(key||'misc')+'.svg';
+}
+function tabIsYard(tab){ return tab === 'yard'; }
+function placeYardFlowers(scene){
+  const spots = [
+    {x:22,y:72},{x:38,y:78},{x:55,y:70},{x:72,y:76},{x:48,y:84},
+  ];
+  spots.forEach((s, i) => {
+    const img = document.createElement('img');
+    img.className = 'yard-flower';
+    img.src = 'assets/yard/flower.png';
+    img.alt = '';
+    img.style.left = s.x + '%';
+    img.style.top = s.y + '%';
+    img.style.width = (22 + (i % 3) * 3) + 'px';
+    img.style.height = img.style.width;
+    scene.appendChild(img);
+  });
 }
 function personIconSrc(p){
   const id = String((p && (p.heroId || p.HeroId)) || '');
@@ -1566,11 +1651,14 @@ function gameLines(kind, name){
 function flavorCdLeft(){
   return Math.max(0, flavorCdUntil - Date.now());
 }
+function walkCdLeft(){
+  return Math.max(0, walkCdUntil - Date.now());
+}
 function startFlavorCooldown(){
   flavorCdUntil = Date.now() + FLAVOR_CD_MS;
   if (flavorCdTimer) clearInterval(flavorCdTimer);
   flavorCdTimer = setInterval(()=>{
-    const left = flavorCdLeft();
+    const left = Math.max(flavorCdLeft(), walkCdLeft());
     const cd = document.getElementById('ipCd');
     if (cd) cd.textContent = left > 0 ? ('Подожди ' + (left/1000).toFixed(1) + ' с') : '';
     const pop = document.getElementById('interactPop');
@@ -1579,6 +1667,9 @@ function startFlavorCooldown(){
     }
     if (left <= 0) { clearInterval(flavorCdTimer); flavorCdTimer = null; }
   }, 100);
+}
+function startWalkCooldown(){
+  walkCdUntil = Date.now() + WALK_CD_MS;
 }
 
 function closeInteract(){
@@ -1859,17 +1950,17 @@ async function doFlavor(pose, objectName, kind){
     };
     if (useSupabaseAtmosphere()) {
       await publishPresenceDual(payload);
-      setSync(true, defaultSyncLabel());
+      refreshGameStatusUi();
     } else {
       const data = await window.BLTHouseExtPublishPresence(payload);
       setPresence(data);
       renderPresenceOnly();
-      setSync(true, defaultSyncLabel());
+      refreshGameStatusUi();
     }
   }catch(e){
     toast(humanQueueError(e));
     setFooter(humanQueueError(e));
-    setSync(true, defaultSyncLabel());
+    refreshGameStatusUi();
   } finally {
     window.__bltFlavorBusy = false;
   }
@@ -2175,7 +2266,7 @@ function renderSide(){
     family:'Жильцы и семейная часть дома.',
     workshop:'Кузница — те же типы и Settings, что !BlacksmithingNew.',
     yard:'Животные, маунты и хозяйство.',
-    shop:'Рынок города дома (Bannerlord ItemType.Goods).',
+    shop:'Рынок города: Goods + гражданская одежда.',
     storage:'Склад BLT / Goods и инвентарь BLT.',
     history:'Хроника изменений дома.',
   };
@@ -2239,7 +2330,7 @@ function renderSide(){
       <div style="margin-top:12px" class="btns">${actionsHtml('yard')}</div>`;
   } else if(currentTab==='shop'){
     html=`<div class="kicker">Магазин · ${esc(house.shopSettlementName||house.locationName||'—')}</div>
-      <div class="notice">${esc(house.shopStatus||'Список с рынка города дома (Bannerlord Goods).')}</div>
+      <div class="notice">${esc(house.shopStatus||'Goods и гражданская одежда с рынка города дома.')}</div>
       <div style="margin-top:12px" class="list">${shopList()}</div>
       <div style="margin-top:12px" class="btns">${actionsHtml('shop')}</div>`;
   } else if(currentTab==='storage'){
@@ -2296,10 +2387,11 @@ function storageList(){
     if(!src || (src.indexOf('assets/icons/')<0 && src.indexOf('assets/heroes/')<0 && src.indexOf('assets/items/')<0 && src.indexOf('house-icons/')<0))
       src=iconUrl(iconKey(type));
     const target = String(idx || id);
-    const btns=owner&&target?`<span class="row-acts">
+    const inspect=`<button type="button" class="btn-inspect" data-ui="inspect" data-src="storage" data-idx="${escAttr(String(idx||target))}">Осмотреть</button>`;
+    const btns=`<span class="row-acts">${inspect}${owner&&target?`
       <button type="button" class="btn-sell" data-ui="act" data-action="sell_item" data-target="${escAttr(target)}">Продать${price?' · '+price:''}</button>
-      <button type="button" class="btn-sell" data-ui="act" data-action="take_item" data-target="${escAttr(target)}">В инвентарь</button>
-    </span>`:'';
+      <button type="button" class="btn-sell" data-ui="act" data-action="take_item" data-target="${escAttr(target)}">В инвентарь</button>`:''}
+    </span>`;
     return `<div class="list-item"><img class="ico" src="${esc(src)}" alt="" onerror="this.src='assets/icons/misc.svg'"><div class="txt"><b>${esc(name)}</b><small>${esc(type||'item')}${tier!=null?' · t'+tier:''}${it.IsUnique||it.isUnique?' · unique':''}</small></div>${btns}</div>`;
   }).join('')||'<div class="list-item">Пусто — куйте в мастерской или положите из инвентаря BLT</div>';
 }
@@ -2310,24 +2402,36 @@ function storageGoodsList(){
     const idx=it.Index||it.index||'';
     const count=it.Count||it.count||1;
     const price=it.EstimatedSellPrice||it.estimatedSellPrice||'';
-    const btns=owner&&idx?`<span class="row-acts">
-      <button type="button" class="btn-sell" data-ui="act" data-action="sell_goods_item" data-target="${escAttr(String(idx))}">Продать${price?' · ~'+price:''}</button>
-    </span>`:'';
+    const inspect=`<button type="button" class="btn-inspect" data-ui="inspect" data-src="goods" data-idx="${escAttr(String(idx))}">Осмотреть</button>`;
+    const btns=`<span class="row-acts">${inspect}${owner&&idx?`
+      <button type="button" class="btn-sell" data-ui="act" data-action="sell_goods_item" data-target="${escAttr(String(idx))}">Продать${price?' · ~'+price:''}</button>`:''}
+    </span>`;
     return `<div class="list-item"><img class="ico" src="assets/icons/misc.svg" alt=""><div class="txt"><b>${esc(name)}</b><small>Goods · ×${count}${price?' · ~'+price+'/шт':''}</small></div>${btns}</div>`;
   }).join('')||'<div class="list-item">Пусто — купите во вкладке Магазин</div>';
 }
 function shopList(){
   const owner = isPanelOwner();
-  return (house.shopItems||[]).slice(0,60).map(it=>{
-    const id=it.ItemStringId||it.itemStringId||'';
-    const name=it.Name||it.name||id;
-    const price=it.UnitPrice||it.unitPrice||0;
-    const avail=it.Available||it.available||0;
-    const btns=owner&&id?`<span class="row-acts">
-      <button type="button" class="btn-sell" data-ui="act" data-action="buy_shop_item" data-target="${escAttr(String(id))}" data-value="1">Купить · ${price}</button>
-    </span>`:'';
-    return `<div class="list-item"><img class="ico" src="assets/icons/misc.svg" alt=""><div class="txt"><b>${esc(name)}</b><small>${esc(id)} · на рынке ${avail} · цена ${price}</small></div>${btns}</div>`;
-  }).join('')||'<div class="list-item">'+(esc(house.shopStatus)||'Нет товаров на рынке')+'</div>';
+  const items = house.shopItems||[];
+  if (!items.length) return '<div class="list-item">'+(esc(house.shopStatus)||'Нет товаров на рынке')+'</div>';
+  const goods = items.filter(it => String(it.ShopKind||it.shopKind||'goods').toLowerCase() !== 'clothes');
+  const clothes = items.filter(it => String(it.ShopKind||it.shopKind||'').toLowerCase() === 'clothes');
+  const render = (arr, title) => {
+    if (!arr.length) return '';
+    return `<div class="kicker" style="margin-top:8px">${esc(title)}</div>` + arr.map((it,i)=>{
+      const id=it.ItemStringId||it.itemStringId||'';
+      const name=it.Name||it.name||id;
+      const price=it.UnitPrice||it.unitPrice||0;
+      const avail=it.Available||it.available||0;
+      const kind=it.ShopKind||it.shopKind||'goods';
+      const globalIdx = items.indexOf(it);
+      const inspect=`<button type="button" class="btn-inspect" data-ui="inspect" data-src="shop" data-idx="${escAttr(String(globalIdx))}">Осмотреть</button>`;
+      const btns=`<span class="row-acts">${inspect}${owner&&id?`
+        <button type="button" class="btn-sell" data-ui="act" data-action="buy_shop_item" data-target="${escAttr(String(id))}" data-value="1">Купить · ${price}</button>`:''}
+      </span>`;
+      return `<div class="list-item"><img class="ico" src="${kind==='clothes'?'assets/icons/armor.svg':'assets/icons/misc.svg'}" alt=""><div class="txt"><b>${esc(name)}</b><small>${esc(kind)} · ${esc(id)} · на рынке ${avail} · цена ${price}</small></div>${btns}</div>`;
+    }).join('');
+  };
+  return render(goods, 'Goods') + render(clothes, 'Гражданская одежда');
 }
 function heroInventoryList(){
   const owner = isPanelOwner();
@@ -2335,15 +2439,17 @@ function heroInventoryList(){
     const name=it.Name||it.name||'';
     const idx=it.Index||it.index;
     const type=it.ItemType||it.itemType||'';
+    const tier=it.Tier??it.tier;
     const price=it.EstimatedSellPrice||it.estimatedSellPrice||'';
     const icon=it.IconUrl||it.iconUrl||iconUrl(iconKey(type));
     let src=String(icon||'');
     if(src.startsWith('/')) src=src.slice(1);
-    const btns=owner&&idx?`<span class="row-acts">
+    const inspect=`<button type="button" class="btn-inspect" data-ui="inspect" data-src="hero" data-idx="${escAttr(String(idx))}">Осмотреть</button>`;
+    const btns=`<span class="row-acts">${inspect}${owner&&idx?`
       <button type="button" class="btn-sell" data-ui="act" data-action="store_item" data-target="${escAttr(String(idx))}">На склад</button>
-      <button type="button" class="btn-sell" data-ui="act" data-action="sell_hero_item" data-target="${escAttr(String(idx))}">Продать${price?' · '+price:''}</button>
-    </span>`:'';
-    return `<div class="list-item"><img class="ico" src="${esc(src)}" alt="" onerror="this.src='assets/icons/misc.svg'"><div class="txt"><b>${esc(name)}</b><small>#${idx} · ${esc(type)}</small></div>${btns}</div>`;
+      <button type="button" class="btn-sell" data-ui="act" data-action="sell_hero_item" data-target="${escAttr(String(idx))}">Продать${price?' · '+price:''}</button>`:''}
+    </span>`;
+    return `<div class="list-item"><img class="ico" src="${esc(src)}" alt="" onerror="this.src='assets/icons/misc.svg'"><div class="txt"><b>${esc(name)}</b><small>#${idx} · ${esc(type)}${tier!=null?' · t'+tier:''}</small></div>${btns}</div>`;
   }).join('')||'<div class="list-item">Инвентарь BLT пуст (владелец видит CustomItems)</div>';
 }
 function historyList(){
@@ -2391,6 +2497,10 @@ function bindRightContentUi(){
       craftSelectedForgeType();
       return;
     }
+    if (ui === 'inspect') {
+      showItemInspect(btn.getAttribute('data-src') || '', btn.getAttribute('data-idx') || '');
+      return;
+    }
     if (ui === 'act') {
       const action = btn.getAttribute('data-action') || '';
       const target = btn.getAttribute('data-target') || '';
@@ -2408,6 +2518,53 @@ function bindRightContentUi(){
       else toast('Действие не найдено: ' + id);
     }
   });
+}
+
+function findItemBySrc(src, idx){
+  const want = String(idx || '');
+  const matchIdx = (it) => String(it.Index ?? it.index ?? '') === want;
+  if (src === 'storage') return (house.storageItems || []).find(matchIdx) || null;
+  if (src === 'goods') return (house.storageGoods || []).find(matchIdx) || null;
+  if (src === 'hero') return (house.heroInventory || []).find(matchIdx) || null;
+  if (src === 'shop') {
+    const i = Number(want);
+    return Number.isFinite(i) ? (house.shopItems || [])[i] : null;
+  }
+  return null;
+}
+function showItemInspect(src, idx){
+  const it = findItemBySrc(src, idx);
+  if (!it) { toast('Предмет не найден'); return; }
+  const name = it.FinalName || it.finalName || it.Name || it.name || it.ItemStringId || it.itemStringId || '—';
+  const rows = [];
+  const add = (k, v) => {
+    if (v == null || v === '' || v === false) return;
+    rows.push(`<b>${esc(k)}</b><span>${esc(String(v))}</span>`);
+  };
+  add('Название', name);
+  add('Тип', it.ItemType || it.itemType || it.Category || it.category);
+  add('Тир', (it.Tier ?? it.tier) != null ? String(it.Tier ?? it.tier) : '');
+  add('Модификатор', it.ItemModifierId || it.itemModifierId);
+  add('Уникальный', (it.IsUnique || it.isUnique) ? 'да' : '');
+  add('ID', it.ItemStringId || it.itemStringId);
+  add('Цена продажи', it.EstimatedSellPrice || it.estimatedSellPrice || it.UnitPrice || it.unitPrice);
+  add('На рынке', it.Available ?? it.available);
+  add('Количество', it.Count || it.count);
+  add('Кузнец', it.CrafterName || it.crafterName);
+  add('Бонус навыка', (it.SkillBonusType || it.skillBonusType)
+    ? ((it.SkillBonusType || it.skillBonusType) + ' +' + (it.SkillBonusAmount || it.skillBonusAmount || 0))
+    : '');
+  add('Бонус модификатора', (it.HasBonusModifier || it.hasBonusModifier)
+    ? ((it.BonusModifierSkill || it.bonusModifierSkill || '') + ' +' + (it.BonusModifierAmount || it.bonusModifierAmount || 0))
+    : '');
+  add('Категория', it.CategoryId || it.categoryId);
+  document.getElementById('modalTitle').textContent = 'Осмотр предмета';
+  document.getElementById('modalBody').innerHTML =
+    '<div class="inspect-grid">' + (rows.join('') || '<span>Нет данных</span>') + '</div>';
+  const conf = document.getElementById('modalConfirm');
+  conf.textContent = 'Закрыть';
+  conf.onclick = closeModal;
+  document.getElementById('modal').classList.add('show');
 }
 
 function switchTab(id){
@@ -2527,6 +2684,7 @@ function applyHouseIfNewer(raw, packedTs){
   const next = isQueueMode() ? applyPanelHouse(raw) : normalize(raw);
   const rev = Number(next.revision || 0) || 0;
   const ts = Number(packedTs || 0) || 0;
+  if (ts > 0) noteGameTs(ts);
   if (house && !Number.isNaN(lastRevision) && rev > 0 && rev < lastRevision) return false;
   if (ts > 0 && lastStateTs > 0 && ts < lastStateTs) return false;
   if (rev > 0) lastRevision = Math.max(lastRevision, rev);
@@ -2547,6 +2705,7 @@ async function refresh(force){
         if (packed && packed.house) {
           raw = packed.house;
           packedTs = Number(packed.ts || 0) || 0;
+          noteGameTs(packedTs);
           try { sessionStorage.setItem('blt_house_last_' + houseId, JSON.stringify(raw)); } catch(e) {}
         }
       } catch (e) {}
@@ -2555,18 +2714,18 @@ async function refresh(force){
     if (!raw) return;
     if (seq !== refreshSeq) return; // newer refresh already in flight / finished
     if (!force && house && Number(raw.Revision || raw.revision || 0) === lastRevision && lastRevision >= 0) {
-      setSync(true, defaultSyncLabel());
+      refreshGameStatusUi();
       return;
     }
     if (!applyHouseIfNewer(raw, packedTs)) {
-      setSync(true, defaultSyncLabel());
+      refreshGameStatusUi();
       return;
     }
-    setSync(true, defaultSyncLabel());
+    refreshGameStatusUi();
     renderAll();
     renderPresenceOnly();
   }catch(e){
-    setSync(true, defaultSyncLabel());
+    refreshGameStatusUi();
     setFooter('Нет свежего /state — показан последний снимок');
   }
 }
@@ -2616,11 +2775,12 @@ async function startAtmosphere(){
         }
       },
     });
-    setSync(true, isOwnerNow() ? 'Владелец · онлайн' : (supabaseOk ? 'Онлайн' : defaultSyncLabel()));
+    refreshGameStatusUi();
     if (!supabaseOk) setFooter('Realtime не подключился — запасной канал Worker');
     else if (isOwnerNow()) setFooter('Владелец · очередь в игру');
   } else if (useSupabaseAtmosphere() && !twitchLoggedIn()) {
     setFooter('Войди Twitch для атмосферы');
+    refreshGameStatusUi();
   }
 
   await announcePresenceHere();
@@ -2643,10 +2803,11 @@ async function startAtmosphere(){
   if(window.BLTHouseTwitch) await window.BLTHouseTwitch.init();
   updateAuthUi();
   await refresh(true);
+  if (!gameStatusTimer) gameStatusTimer = setInterval(() => refreshGameStatusUi(), 5000);
   if (!isQueueMode()) {
     pollTimer=setInterval(()=>refresh(false), 2000);
   } else {
-    setSync(true, defaultSyncLabel());
+    refreshGameStatusUi();
     setFooter(isOwnerNow()
       ? 'Владелец · очередь в игру'
       : (twitchLoggedIn()
@@ -2657,8 +2818,12 @@ async function startAtmosphere(){
       await window.BLTHouseSupabaseQueue.subscribeState(houseId, {
         onState: (packed) => {
           if (!packed || !packed.house) return;
-          if (!applyHouseIfNewer(packed.house, packed.ts)) return;
-          setSync(true, defaultSyncLabel());
+          noteGameTs(packed.ts);
+          if (!applyHouseIfNewer(packed.house, packed.ts)) {
+            refreshGameStatusUi();
+            return;
+          }
+          refreshGameStatusUi();
           renderAll();
           renderPresenceOnly();
         },

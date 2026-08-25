@@ -1,4 +1,4 @@
-/* Atmosphere realtime via Supabase (WebSocket). Game queue stays on Cloudflare Worker. */
+/* Atmosphere realtime via Supabase (WebSocket). */
 (function () {
   const cfg = () => window.BLT_HOUSE_EXT || {};
 
@@ -133,8 +133,7 @@
       }, payload || {});
       if (payload && payload.eventId) row.id = payload.eventId;
 
-      // Presence.track is rate-limited on Free — still track on real moves (x/y change)
-      // so other clients see position via presence sync, not only broadcast.
+      // Presence.track is rate-limited on Free — track on moves, but never block flavor broadcast.
       const now = Date.now();
       const posChanged =
         (row.x != null && row.x !== this._lastTrackX) ||
@@ -142,16 +141,16 @@
       const shouldTrack =
         payload.idle === true ||
         !this._lastTrackAt ||
-        now - this._lastTrackAt > 8000 ||
+        now - this._lastTrackAt > 2500 ||
         this._lastTrackPose !== row.pose ||
-        (posChanged && now - (this._lastTrackAt || 0) > 1500);
+        (posChanged && now - (this._lastTrackAt || 0) > 400);
       if (shouldTrack) {
         this._lastTrackAt = now;
         this._lastTrackPose = row.pose;
         this._lastTrackX = row.x;
         this._lastTrackY = row.y;
-        try {
-          await channel.track({
+        channel
+          .track({
             login,
             display,
             pose: row.pose,
@@ -160,10 +159,8 @@
             x: row.x,
             y: row.y,
             ts: row.ts,
-          });
-        } catch (e) {
-          /* presence throttle — broadcast still OK */
-        }
+          })
+          .catch(() => { /* presence throttle — broadcast still OK */ });
       }
 
       if (payload.idle === true || row.pose === "here") {
