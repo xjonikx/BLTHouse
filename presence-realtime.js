@@ -133,17 +133,23 @@
       }, payload || {});
       if (payload && payload.eventId) row.id = payload.eventId;
 
-      // Presence.track is rate-limited to ~5 calls / 30s per client on Free.
-      // Do NOT track on every click — only broadcast. Track sparsely for "who's here".
+      // Presence.track is rate-limited on Free — still track on real moves (x/y change)
+      // so other clients see position via presence sync, not only broadcast.
       const now = Date.now();
+      const posChanged =
+        (row.x != null && row.x !== this._lastTrackX) ||
+        (row.y != null && row.y !== this._lastTrackY);
       const shouldTrack =
         payload.idle === true ||
         !this._lastTrackAt ||
         now - this._lastTrackAt > 8000 ||
-        this._lastTrackPose !== row.pose;
+        this._lastTrackPose !== row.pose ||
+        (posChanged && now - (this._lastTrackAt || 0) > 1500);
       if (shouldTrack) {
         this._lastTrackAt = now;
         this._lastTrackPose = row.pose;
+        this._lastTrackX = row.x;
+        this._lastTrackY = row.y;
         try {
           await channel.track({
             login,
@@ -161,6 +167,27 @@
       }
 
       if (payload.idle === true || row.pose === "here") {
+        // Idle still broadcasts nothing heavy; emit local actors. For "here" after walk, also broadcast coords once.
+        if (row.x != null && row.y != null && payload.idle === true) {
+          try {
+            await channel.send({
+              type: "broadcast",
+              event: "flavor",
+              payload: {
+                id: row.id || ("here-" + now),
+                login,
+                display,
+                pose: "here",
+                object: "",
+                room: row.room || "",
+                x: row.x,
+                y: row.y,
+                text: display + " · здесь",
+                ts: row.ts,
+              },
+            });
+          } catch (e) {}
+        }
         emitActors();
         return { ok: true, idle: true };
       }

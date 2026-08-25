@@ -5,11 +5,11 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <base href="/BLTHouse/">
 <title>BLT House</title>
-<script src="config.js?v=rt7"></script>
+<script src="config.js?v=rt8"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="twitch-auth.js?v=rt7"></script>
-<script src="extension-bridge.js?v=rt7"></script>
-<script src="presence-realtime.js?v=rt7"></script>
+<script src="twitch-auth.js?v=rt8"></script>
+<script src="extension-bridge.js?v=rt8"></script>
+<script src="presence-realtime.js?v=rt8"></script>
 <style>
 :root{
   --bg:#0d0d0c;--panel:#171614;--panel2:#201e19;--panel3:#29251e;
@@ -951,16 +951,47 @@ function renderHeader(){
 function saveVisualPositions(){
   try { localStorage.setItem('blt_house_visual_positions', JSON.stringify(visualPositions)); } catch (e) {}
 }
+/** Layout stores furniture only. People live in presence/realtime — never in layout. */
+function isFurnitureLayoutKey(key){
+  return String(key || '').indexOf('object:') === 0;
+}
+function furnitureOnlyMap(positions){
+  const out = {};
+  Object.keys(positions || {}).forEach((key) => {
+    if (!isFurnitureLayoutKey(key)) return;
+    const p = positions[key];
+    if (p && typeof p.x === 'number' && typeof p.y === 'number') out[key] = { x: p.x, y: p.y };
+  });
+  return out;
+}
+function stripPersonKeysFromRooms(rooms){
+  const out = {};
+  Object.keys(rooms || {}).forEach((room) => {
+    out[room] = furnitureOnlyMap(rooms[room] || {});
+  });
+  return out;
+}
+/**
+ * Atmosphere live updates go through Supabase WebSocket when available.
+ * Worker presence is only a backup for "who is online" (idle), not for walk/layout echo.
+ */
 async function publishPresenceDual(payload){
   const eventId = payload && payload.eventId ? payload.eventId : ((payload && payload.idle) ? null : newEventId());
   const body = Object.assign({}, payload || {});
   if (eventId) body.eventId = eventId;
   let workerData = null;
-  if (typeof window.BLTHouseExtPublishPresence === 'function') {
-    try { workerData = await window.BLTHouseExtPublishPresence(body); } catch (e) {}
-  }
+
   if (useSupabaseAtmosphere() && window.BLTHouseRealtime) {
     try { await window.BLTHouseRealtime.publishFlavor(body); } catch (e) {}
+    // Idle heartbeat to Worker keeps "кто здесь" if someone has no Supabase; never use Worker reply to move avatars.
+    if (body.idle === true && typeof window.BLTHouseExtPublishPresence === 'function') {
+      try { workerData = await window.BLTHouseExtPublishPresence(body); } catch (e) {}
+    }
+    return workerData;
+  }
+
+  if (typeof window.BLTHouseExtPublishPresence === 'function') {
+    try { workerData = await window.BLTHouseExtPublishPresence(body); } catch (e) {}
   }
   return workerData;
 }
@@ -972,7 +1003,7 @@ async function announcePresenceHere(){
   const login = String(u.login || '').toLowerCase();
   const mine = (presence.actors || {})[login] || {};
   try {
-    const data = await publishPresenceDual({
+    await publishPresenceDual({
       idle: true,
       pose: mine.pose || 'here',
       object: mine.object || '',
@@ -980,17 +1011,17 @@ async function announcePresenceHere(){
       x: mine.x != null ? mine.x : null,
       y: mine.y != null ? mine.y : null,
     });
-    if (data) { setPresence(data); renderPresenceOnly(); }
+    // Do not setPresence(worker snapshot) here — it can snap avatars backward.
+    renderPresenceOnly();
   } catch (e) {}
 }
 function mergeLayoutRooms(rooms){
   if (!rooms || typeof rooms !== 'object') return;
-  Object.keys(rooms).forEach((room) => {
-    const pos = rooms[room];
-    if (!pos || typeof pos !== 'object') return;
+  const clean = stripPersonKeysFromRooms(rooms);
+  Object.keys(clean).forEach((room) => {
+    const pos = clean[room];
     Object.keys(pos).forEach((key) => {
-      const p = pos[key];
-      if (p && typeof p.x === 'number' && typeof p.y === 'number') visualPositions[key] = { x: p.x, y: p.y };
+      visualPositions[key] = { x: pos[key].x, y: pos[key].y };
     });
   });
 }
@@ -1026,7 +1057,7 @@ function applyLayoutToScene(roomId){
   const scene = document.querySelector('.scene.active .mobile-room') || document.querySelector('.scene.active');
   if (!scene) return;
   applyingRemoteLayout = true;
-  const roomPositions = (remoteLayout.rooms && remoteLayout.rooms[roomId || currentTab]) || {};
+  const roomPositions = furnitureOnlyMap((remoteLayout.rooms && remoteLayout.rooms[roomId || currentTab]) || {});
   Object.keys(roomPositions).forEach((key) => {
     const pos = roomPositions[key];
     if (!pos || pos.x == null || pos.y == null) return;
@@ -1052,16 +1083,13 @@ async function publishLayoutRoom(reset){
   if (!layoutReadyFromServer && !reset) return;
   const { houseId } = parseRoute();
   if (!houseId) return;
-  const roomPositions = {};
-  if (!reset) {
-    Object.keys(visualPositions).forEach((key) => {
-      const p = visualPositions[key];
-      if (p && typeof p.x === 'number' && typeof p.y === 'number') roomPositions[key] = { x: p.x, y: p.y };
-    });
-  }
+  const roomPositions = reset ? {} : furnitureOnlyMap(visualPositions);
   const baseRev = Number(remoteLayout.rev || layoutSince || 0) || 0;
   const ts = Date.now();
-  const rooms = Object.assign({}, remoteLayout.rooms || {}, { [currentTab]: reset ? {} : Object.assign({}, (remoteLayout.rooms && remoteLayout.rooms[currentTab]) || {}, roomPositions) });
+  const prevRoom = furnitureOnlyMap((remoteLayout.rooms && remoteLayout.rooms[currentTab]) || {});
+  const rooms = Object.assign({}, stripPersonKeysFromRooms(remoteLayout.rooms || {}), {
+    [currentTab]: reset ? {} : Object.assign({}, prevRoom, roomPositions),
+  });
   const localSnap = {
     room: currentTab,
     positions: roomPositions,
@@ -1072,7 +1100,10 @@ async function publishLayoutRoom(reset){
     rooms,
   };
 
-  // Worker + Supabase independently — one failure must not block the other.
+  // Live furniture: Supabase. Persist furniture: Worker.
+  if (useSupabaseAtmosphere() && window.BLTHouseRealtime) {
+    try { await window.BLTHouseRealtime.publishLayout(localSnap); } catch (e) {}
+  }
   if (typeof window.BLTHouseExtPublishLayout === 'function') {
     try {
       const payload = reset
@@ -1080,16 +1111,15 @@ async function publishLayoutRoom(reset){
         : { room: currentTab, positions: roomPositions, baseRev };
       const data = await window.BLTHouseExtPublishLayout(payload);
       if (data && data.rooms) {
-        remoteLayout = { ts: data.ts || Date.now(), rev: data.rev || data.ts || 0, rooms: data.rooms };
+        remoteLayout = {
+          ts: data.ts || Date.now(),
+          rev: data.rev || data.ts || 0,
+          rooms: stripPersonKeysFromRooms(data.rooms),
+        };
         layoutSince = Math.max(layoutSince, remoteLayout.rev);
-        mergeLayoutRooms(data.rooms);
+        mergeLayoutRooms(remoteLayout.rooms);
         layoutReadyFromServer = true;
       }
-    } catch (e) {}
-  }
-  if (useSupabaseAtmosphere() && window.BLTHouseRealtime) {
-    try {
-      await window.BLTHouseRealtime.publishLayout(localSnap);
     } catch (e) {}
   }
 }
@@ -1102,7 +1132,7 @@ async function layoutPollLoop(){
     const { houseId } = parseRoute();
     if (!houseId) { await new Promise((r) => setTimeout(r, 1000)); continue; }
     try {
-      const wait = seeded ? 2500 : 0;
+      const wait = seeded ? (useSupabaseAtmosphere() ? 8000 : 2500) : 0;
       const data = await window.BLTHouseExtFetchLayout(houseId, { since: layoutSince, wait });
       if (data && data.ok !== false && data.rooms) {
         ingestRemoteLayout(data);
@@ -1122,15 +1152,19 @@ async function layoutPollLoop(){
 function ingestRemoteLayout(payload){
   if (!payload) return;
   const rev = Number(payload.rev || payload.ts || Date.now()) || 0;
-  remoteLayout.rooms = remoteLayout.rooms || {};
-  // Always merge room keys (even if rev is not newer) so concurrent object moves are not dropped.
+  remoteLayout.rooms = stripPersonKeysFromRooms(remoteLayout.rooms || {});
   if (payload.rooms) {
-    Object.keys(payload.rooms).forEach((room) => {
-      remoteLayout.rooms[room] = Object.assign({}, remoteLayout.rooms[room] || {}, payload.rooms[room] || {});
+    const clean = stripPersonKeysFromRooms(payload.rooms);
+    Object.keys(clean).forEach((room) => {
+      remoteLayout.rooms[room] = Object.assign({}, remoteLayout.rooms[room] || {}, clean[room] || {});
     });
   }
   if (payload.room && payload.positions) {
-    remoteLayout.rooms[payload.room] = Object.assign({}, remoteLayout.rooms[payload.room] || {}, payload.positions);
+    remoteLayout.rooms[payload.room] = Object.assign(
+      {},
+      remoteLayout.rooms[payload.room] || {},
+      furnitureOnlyMap(payload.positions)
+    );
   }
   if (payload.reset && payload.room) remoteLayout.rooms[payload.room] = {};
   if (!layoutSince || rev >= layoutSince) {
@@ -1178,13 +1212,10 @@ async function walkToPoint(x, y){
     });
     renderPresenceOnly();
     try {
-      const data = await publishPresenceDual({
+      // Live move = Supabase only (publishPresenceDual). Never apply Worker layout/presence echo here.
+      await publishPresenceDual({
         pose: 'walk', object: '', room: currentTab, idle: false, x: pos.x, y: pos.y, eventId: newEventId(),
       });
-      if (data) {
-        setPresence(data);
-        if (data.layout) ingestRemoteLayout(data.layout);
-      }
       renderPresenceOnly();
     } catch (e) {}
     setTimeout(async () => {
@@ -1192,6 +1223,7 @@ async function walkToPoint(x, y){
       presence.actors[login].pose = 'here';
       presence.actors[login].x = pos.x;
       presence.actors[login].y = pos.y;
+      presence.actors[login].ts = Date.now();
       renderPresenceOnly();
       try {
         await publishPresenceDual({ idle: true, pose: 'here', room: currentTab, x: pos.x, y: pos.y });
@@ -1576,10 +1608,15 @@ function setPresence(remote, opts){
   if(!remote || typeof remote !== 'object') return presence;
   if (!presenceJoinedAt) presenceJoinedAt = Date.now();
 
+  const me = String((window.BLTHouseTwitch && window.BLTHouseTwitch.user && window.BLTHouseTwitch.user.login) || '').toLowerCase();
   const actors = Object.assign({}, presence.actors || {});
   Object.keys(remote.actors || {}).forEach((k) => {
     const a = remote.actors[k];
     const cur = actors[k];
+    // Never let a slower Worker snapshot pull OUR avatar backward.
+    if (me && String(k).toLowerCase() === me && cur && Number(cur.ts || 0) > Number(a.ts || 0)) {
+      return;
+    }
     if (!cur || Number(a.ts || 0) >= Number(cur.ts || 0)) {
       actors[k] = Object.assign({}, cur || {}, a, {
         x: a.x != null ? Number(a.x) : (cur && cur.x),
@@ -1989,6 +2026,23 @@ function renderPresenceOnly(){
 
 async function pollPresenceOnce(){
   if(!isQueueMode() || typeof window.BLTHouseExtPublishPresence !== 'function') return;
+  // With Supabase live, Worker heartbeat is optional backup only — do not apply snapshot to DOM.
+  if (useSupabaseAtmosphere()) {
+    if(twitchLoggedIn() && Date.now()-(window.__bltPresenceBeat||0)>15000){
+      window.__bltPresenceBeat=Date.now();
+      const u = window.BLTHouseTwitch.user || {};
+      const mine = (presence.actors||{})[String(u.login||'').toLowerCase()];
+      window.BLTHouseExtPublishPresence({
+        idle: true,
+        pose: (mine && mine.pose) || 'here',
+        object: (mine && mine.object) || '',
+        room: currentTab,
+        x: mine && mine.x != null ? mine.x : null,
+        y: mine && mine.y != null ? mine.y : null,
+      }).catch(()=>{});
+    }
+    return;
+  }
   const {houseId}=parseRoute();
   if(!houseId) return;
   try{
@@ -2014,6 +2068,8 @@ async function pollPresenceOnce(){
 
 async function presenceLongPollLoop(){
   if (window.__bltPresenceLoop) return;
+  // Supabase is the live atmosphere channel — do not long-poll Worker (causes lag + rollback).
+  if (useSupabaseAtmosphere()) return;
   window.__bltPresenceLoop = true;
   presenceJoinedAt = Date.now();
   seenEventIds = new Set();
@@ -2036,6 +2092,7 @@ async function presenceLongPollLoop(){
           setPresence(data);
           renderPresenceOnly();
         }
+        // Furniture only — never people from presence piggyback.
         if (data.layout) ingestRemoteLayout(data.layout);
         const rev = Number(data.rev || 0);
         if (rev > since) since = rev;
@@ -2371,8 +2428,9 @@ async function startAtmosphere(){
   const {houseId} = parseRoute();
   if (!houseId) return;
 
+  let supabaseOk = false;
   if (useSupabaseAtmosphere() && twitchLoggedIn()) {
-    const ok = await window.BLTHouseRealtime.connect(houseId, {
+    supabaseOk = await window.BLTHouseRealtime.connect(houseId, {
       onUpdate: (msg) => {
         if (msg.kind === 'actors') {
           applyRealtimeActors(msg.actors);
@@ -2385,15 +2443,21 @@ async function startAtmosphere(){
         }
       },
     });
-    setSync(true, ok ? 'Онлайн' : defaultSyncLabel());
-    if (!ok) setFooter('Realtime не подключился — Worker presence всё равно работает');
+    setSync(true, supabaseOk ? 'Онлайн' : defaultSyncLabel());
+    if (!supabaseOk) setFooter('Realtime не подключился — запасной канал Worker');
   } else if (useSupabaseAtmosphere() && !twitchLoggedIn()) {
     setFooter('Войди Twitch для атмосферы');
   }
 
   await announcePresenceHere();
-  if (!window.__bltPresenceLoop) presenceLongPollLoop();
+  // Furniture seed/backup from Worker (objects only). Live furniture also via Supabase broadcast.
   if (!window.__bltLayoutLoop) layoutPollLoop();
+  // People / walk: Worker long-poll only if Supabase is off or failed.
+  if (!supabaseOk && !window.__bltPresenceLoop) presenceLongPollLoop();
+  if (supabaseOk) {
+    // Quiet Worker idle ping so "кто здесь" survives if a guest has no WS — no DOM apply.
+    setInterval(() => { pollPresenceOnce(); }, 15000);
+  }
 }
 
 (async function boot(){
