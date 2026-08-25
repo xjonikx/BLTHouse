@@ -5,12 +5,12 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <base href="/BLTHouse/">
 <title>BLT House</title>
-<script src="config.js?v=rt17"></script>
+<script src="config.js?v=rt18"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="supabase-queue.js?v=rt17"></script>
-<script src="twitch-auth.js?v=rt17"></script>
-<script src="extension-bridge.js?v=rt17"></script>
-<script src="presence-realtime.js?v=rt17"></script>
+<script src="supabase-queue.js?v=rt18"></script>
+<script src="twitch-auth.js?v=rt18"></script>
+<script src="extension-bridge.js?v=rt18"></script>
+<script src="presence-realtime.js?v=rt18"></script>
 <style>
 :root{
   --bg:#0d0d0c;--panel:#171614;--panel2:#201e19;--panel3:#29251e;
@@ -769,15 +769,18 @@ async function fetchHouse(){
         const packed = await window.BLTHouseExtFetchState(houseId, viewer);
         const remote = packed && packed.house ? packed.house : null;
         if (remote) {
-          try { sessionStorage.setItem(cacheKey, JSON.stringify(remote)); } catch(e) {}
+          try { sessionStorage.setItem(cacheKey, slimHouseJson(remote)); } catch(e) {}
           return remote;
         }
       } catch (e) { console.warn('state', e); }
     }
     try {
       const cached = sessionStorage.getItem(cacheKey);
-      if (cached) return JSON.parse(cached);
-    } catch (e) {}
+      if (cached) {
+        if (cached.length > 250000) { sessionStorage.removeItem(cacheKey); }
+        else return JSON.parse(cached);
+      }
+    } catch (e) { try { sessionStorage.removeItem(cacheKey); } catch(_){} }
     return queueStub(houseId, viewer);
   }
 
@@ -802,6 +805,42 @@ async function fetchHouse(){
     return null;
   }
   return await r.json();
+}
+
+function slimHouseJson(raw){
+  try {
+    const o = Object.assign({}, raw || {});
+    o.ShopItems = [];
+    o.shopItems = [];
+    return JSON.stringify(o);
+  } catch (e) {
+    return '{}';
+  }
+}
+
+function mergeShopFromIncoming(next){
+  if (!next) return;
+  const incoming = next.shopItems || [];
+  const append = !!(next.shopAppend);
+  const prev = (house && house.shopItems) ? house.shopItems : [];
+  if (incoming.length) {
+    if (append && prev.length) {
+      const seen = new Set(prev.map(it => String(it.ItemStringId||it.itemStringId||'').toLowerCase()));
+      const merged = prev.slice();
+      incoming.forEach(it => {
+        const id = String(it.ItemStringId||it.itemStringId||'').toLowerCase();
+        if (id && seen.has(id)) return;
+        if (id) seen.add(id);
+        merged.push(it);
+      });
+      next.shopItems = merged;
+    }
+    // else keep next.shopItems as replacement (refresh page 1)
+  } else if (prev.length) {
+    next.shopItems = prev;
+    if (!next.shopStatus && house.shopStatus) next.shopStatus = house.shopStatus;
+    if (!next.shopSettlementName && house.shopSettlementName) next.shopSettlementName = house.shopSettlementName;
+  }
 }
 
 function applyPanelHouse(raw){
@@ -863,7 +902,7 @@ async function postAction(action, extra={}){
         window.BLTHouseExtWaitState(houseId, { prevTs, actionId, timeoutMs: 8000, viewer: parseRoute().viewer }).then(remote => {
           if (!remote) { refreshGameStatusUi(); toast('Игра не ответила — проверь, что мод запущен'); return; }
           applyHouseIfNewer(remote, null);
-          try { sessionStorage.setItem('blt_house_last_' + houseId, JSON.stringify(remote)); } catch(e) {}
+          try { sessionStorage.setItem('blt_house_last_' + houseId, slimHouseJson(remote)); } catch(e) {}
           renderAll();
           const msg = remote.statusText || remote.StatusText || '';
           if (msg && msg !== 'функционирует нормально') toast(msg);
@@ -972,6 +1011,9 @@ function normalize(h){
     shopItems: g('ShopItems','shopItems')||[],
     shopSettlementName: g('ShopSettlementName','shopSettlementName')||'',
     shopStatus: g('ShopStatus','shopStatus')||'',
+    shopAppend: !!(g('ShopAppend','shopAppend')),
+    shopGoodsTotal: Number(g('ShopGoodsTotal','shopGoodsTotal')||0)||0,
+    shopClothesTotal: Number(g('ShopClothesTotal','shopClothesTotal')||0)||0,
     forgeItemTypes: g('ForgeItemTypes','forgeItemTypes')||[],
     craftingSkill: g('CraftingSkill','craftingSkill')||0,
     craftingMaxTier: g('CraftingMaxTier','craftingMaxTier')||0,
@@ -2465,8 +2507,11 @@ function shopList(kind){
     </span>`;
     return `<div class="list-item"><img class="ico" src="${wantClothes?'assets/icons/armor.svg':'assets/icons/misc.svg'}" alt=""><div class="txt"><b>${esc(name)}</b><small>${esc(sk)} · ${esc(id)} · на рынке ${avail} · цена ${price}</small></div>${btns}</div>`;
   }).join('');
-  if (items.length > shown.length) {
-    html += `<button type="button" class="action" data-ui="shop-more" data-kind="${escAttr(key)}" style="margin-top:8px">Показать ещё (${items.length - shown.length} из ${items.length})</button>`;
+  const total = wantClothes ? Number(house.shopClothesTotal||0) : Number(house.shopGoodsTotal||0);
+  const haveMore = (total > 0 && items.length < total) || items.length > shown.length;
+  if (haveMore) {
+    const left = total > items.length ? (total - items.length) : (items.length - shown.length);
+    html += `<button type="button" class="action" data-ui="shop-more" data-kind="${escAttr(key)}" style="margin-top:8px">Показать ещё (~${left})</button>`;
   }
   return html;
 }
@@ -2547,8 +2592,8 @@ function bindRightContentUi(){
     }
     if (ui === 'shop-more') {
       const kind = btn.getAttribute('data-kind') === 'clothes' ? 'clothes' : 'goods';
-      shopShown[kind] = (Number(shopShown[kind]) || SHOP_PAGE) + SHOP_PAGE;
-      renderSide();
+      // Ask game for next page from in-memory shop cache (does not dump full catalog into state).
+      postAction('refresh_shop', { value: 'more:' + kind });
       return;
     }
     if (ui === 'act') {
@@ -2625,6 +2670,9 @@ function switchTab(id){
   }
   currentTab = id;
   renderAll();
+  if (isShopTab(id) && isPanelOwner() && (!(house.shopItems||[]).length)) {
+    postAction('refresh_shop', { value: 'refresh' });
+  }
 }
 
 function onAction(a){
@@ -2643,7 +2691,8 @@ function onAction(a){
   }
   if(a.id==='refresh_shop'){
     if (currentTab!=='shop_clothes') switchTab('shop_goods');
-    postAction('refresh_shop');
+    else renderAll();
+    postAction('refresh_shop', { value: 'refresh' });
     return;
   }
   if(a.id==='invite' || a.id==='rename'){
@@ -2737,6 +2786,7 @@ function renderAll(){
 
 function applyHouseIfNewer(raw, packedTs){
   const next = isQueueMode() ? applyPanelHouse(raw) : normalize(raw);
+  mergeShopFromIncoming(next);
   const rev = Number(next.revision || 0) || 0;
   const ts = Number(packedTs || 0) || 0;
   if (ts > 0) noteGameTs(ts);

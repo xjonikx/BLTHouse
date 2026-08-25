@@ -27,8 +27,68 @@
     return String(cfg().broadcasterId || cfg().channel || "default");
   }
 
+  /** Strip a top-level JSON array field using bracket matching (avoids OOM parse of huge ShopItems). */
+  function stripJsonArrayField(text, field) {
+    const key = '"' + field + '"';
+    let out = String(text || "");
+    let idx = 0;
+    while (idx < out.length) {
+      const k = out.indexOf(key, idx);
+      if (k < 0) break;
+      const colon = out.indexOf(":", k + key.length);
+      if (colon < 0) break;
+      let i = colon + 1;
+      while (i < out.length && /\s/.test(out[i])) i++;
+      if (out[i] !== "[") {
+        idx = i + 1;
+        continue;
+      }
+      let depth = 0;
+      let j = i;
+      for (; j < out.length; j++) {
+        const c = out[j];
+        if (c === "[") depth++;
+        else if (c === "]") {
+          depth--;
+          if (depth === 0) {
+            j++;
+            break;
+          }
+        } else if (c === '"') {
+          j++;
+          while (j < out.length) {
+            if (out[j] === "\\") {
+              j += 2;
+              continue;
+            }
+            if (out[j] === '"') break;
+            j++;
+          }
+        }
+      }
+      out = out.slice(0, i) + "[]" + out.slice(j);
+      idx = i + 2;
+    }
+    return out;
+  }
+
+  function neuterShopInHouseObj(h) {
+    if (!h || typeof h !== "object") return h;
+    if (Array.isArray(h.ShopItems) && h.ShopItems.length > 160) h.ShopItems = h.ShopItems.slice(0, 160);
+    if (Array.isArray(h.shopItems) && h.shopItems.length > 160) h.shopItems = h.shopItems.slice(0, 160);
+    return h;
+  }
+
+  function neuterShopInRow(row) {
+    if (!row) return row;
+    if (row.owner_house) neuterShopInHouseObj(row.owner_house);
+    if (row.public_house) neuterShopInHouseObj(row.public_house);
+    return row;
+  }
+
   function pickHouseFromRow(row, viewer) {
     if (!row) return null;
+    neuterShopInRow(row);
     const owner = String(row.owner_player_id || "").toLowerCase();
     const who = String(viewer || "").toLowerCase();
     const isOwner = !!(who && owner && who === owner);
@@ -51,6 +111,40 @@
     const viewer = (twitch.user && twitch.user.login) || "";
     const packed = pickHouseFromRow(row, viewer);
     if (packed) stateHandlers.onState(packed);
+  }
+
+  /** Raw REST fetch + strip bloated ShopItems before JSON.parse (fixes hang on old Supabase rows). */
+  async function fetchStateRaw(houseId, viewer) {
+    const c = cfg();
+    if (!c.supabaseUrl || !c.supabaseAnonKey || !houseId) return null;
+    const url =
+      String(c.supabaseUrl).replace(/\/$/, "") +
+      "/rest/v1/blt_house_state?house_id=eq." +
+      encodeURIComponent(houseId) +
+      "&select=house_id,owner_player_id,ts,last_action_id,public_house,owner_house";
+    const res = await fetch(url, {
+      headers: {
+        apikey: c.supabaseAnonKey,
+        Authorization: "Bearer " + c.supabaseAnonKey,
+        Accept: "application/json",
+      },
+      cache: "no-store",
+    });
+    if (!res.ok) return null;
+    let text = await res.text();
+    if (!text || text === "[]" || text === "null") return null;
+    if (text.length > 120000) {
+      text = stripJsonArrayField(stripJsonArrayField(text, "ShopItems"), "shopItems");
+    }
+    let rows;
+    try {
+      rows = JSON.parse(text);
+    } catch (e) {
+      console.warn("blt state parse", e);
+      return null;
+    }
+    const row = Array.isArray(rows) ? rows[0] : rows;
+    return pickHouseFromRow(row, viewer);
   }
 
   window.BLTHouseSupabaseQueue = {
@@ -89,15 +183,12 @@
     },
 
     async fetchState(houseId, viewer) {
-      const sb = getClient();
-      if (!sb || !houseId) return null;
-      const { data, error } = await sb
-        .from("blt_house_state")
-        .select("house_id,owner_player_id,ts,last_action_id,public_house,owner_house")
-        .eq("house_id", houseId)
-        .maybeSingle();
-      if (error || !data) return null;
-      return pickHouseFromRow(data, viewer);
+      try {
+        return await fetchStateRaw(houseId, viewer);
+      } catch (e) {
+        console.warn("fetchStateRaw", e);
+        return null;
+      }
     },
 
     async waitState(houseId, opts) {
@@ -131,7 +222,6 @@
       const sb = getClient();
       if (!sb || !stateHouseId) return false;
 
-      // Seed once
       try {
         const twitch = window.BLTHouseTwitch || {};
         const packed = await this.fetchState(stateHouseId, (twitch.user && twitch.user.login) || "");
@@ -160,7 +250,9 @@
 
     async unsubscribeState() {
       if (stateChannel) {
-        try { await stateChannel.unsubscribe(); } catch (e) {}
+        try {
+          await stateChannel.unsubscribe();
+        } catch (e) {}
         stateChannel = null;
       }
       stateHouseId = "";
