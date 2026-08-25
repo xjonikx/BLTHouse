@@ -5,11 +5,11 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <base href="/BLTHouse/">
 <title>BLT House</title>
-<script src="config.js?v=rt3"></script>
+<script src="config.js?v=rt4"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="twitch-auth.js?v=rt3"></script>
-<script src="extension-bridge.js?v=rt3"></script>
-<script src="presence-realtime.js?v=rt3"></script>
+<script src="twitch-auth.js?v=rt4"></script>
+<script src="extension-bridge.js?v=rt4"></script>
+<script src="presence-realtime.js?v=rt4"></script>
 <style>
 :root{
   --bg:#0d0d0c;--panel:#171614;--panel2:#201e19;--panel3:#29251e;
@@ -955,7 +955,7 @@ function scenePoint(e, scene){
 }
 function bindSceneDrag(el, scene, kind, id, basePos){
   el.addEventListener('pointerdown', e => {
-    if (sceneMode !== 'move') return;
+    if (sceneMode !== 'move' || !canEditSceneLayout()) return;
     e.preventDefault(); e.stopPropagation();
     const p = scenePoint(e, scene);
     const left = parseFloat(el.style.left) || basePos.x;
@@ -966,6 +966,7 @@ function bindSceneDrag(el, scene, kind, id, basePos){
   });
   el.addEventListener('pointermove', e => {
     if (!dragState || dragState.el !== el) return;
+    if (!canEditSceneLayout()) return;
     const p = scenePoint(e, scene);
     el.style.left = Math.max(1, Math.min(94, p.x - dragState.dx)) + '%';
     el.style.top = Math.max(3, Math.min(90, p.y - dragState.dy)) + '%';
@@ -981,7 +982,30 @@ function bindSceneDrag(el, scene, kind, id, basePos){
     toast('Позиция сохранена');
   });
 }
+function canEditSceneLayout(){
+  return isOwnerNow();
+}
+function updateSceneToolLocks(){
+  const mb = document.getElementById('moveModeBtn');
+  const rb = document.getElementById('resetPositionsBtn');
+  const allow = canEditSceneLayout();
+  if (mb) {
+    mb.disabled = !allow;
+    mb.title = allow ? 'Перемещать мебель/персонажей (только владелец)' : 'В чужом доме нельзя';
+    mb.style.opacity = allow ? '' : '0.4';
+  }
+  if (rb) {
+    rb.disabled = !allow;
+    rb.title = allow ? 'Сбросить позиции' : 'В чужом доме нельзя';
+    rb.style.opacity = allow ? '' : '0.4';
+  }
+  if (!allow && sceneMode === 'move') setSceneMode('inspect');
+}
 function setSceneMode(mode){
+  if (mode === 'move' && !canEditSceneLayout()) {
+    toast('Перемещение только в своём доме');
+    mode = 'inspect';
+  }
   sceneMode = mode;
   document.body.classList.toggle('drag-mode', mode === 'move');
   const ib = document.getElementById('inspectModeBtn');
@@ -991,18 +1015,26 @@ function setSceneMode(mode){
   if (mb) mb.classList.toggle('active', mode === 'move');
   if (help) help.textContent = mode === 'move'
     ? 'Перетаскивайте персонажей и предметы'
-    : 'Нажмите на персонажа или предмет';
+    : (canEditSceneLayout() ? 'Нажмите на персонажа или предмет' : 'Чужой дом · только осмотр и атмосфера');
   const hint = document.getElementById('interactionHint');
   if (hint) hint.classList.remove('show');
+  updateSceneToolLocks();
 }
 function setupSceneTools(){
   const ib = document.getElementById('inspectModeBtn');
   const mb = document.getElementById('moveModeBtn');
   const rb = document.getElementById('resetPositionsBtn');
   if (ib) ib.onclick = () => setSceneMode('inspect');
-  if (mb) mb.onclick = () => setSceneMode('move');
-  if (rb) rb.onclick = () => { visualPositions = {}; saveVisualPositions(); renderScene(); toast('Позиции сброшены'); };
+  if (mb) mb.onclick = () => {
+    if (!canEditSceneLayout()) { toast('Перемещение только в своём доме'); return; }
+    setSceneMode('move');
+  };
+  if (rb) rb.onclick = () => {
+    if (!canEditSceneLayout()) { toast('Сброс только в своём доме'); return; }
+    visualPositions = {}; saveVisualPositions(); renderScene(); toast('Позиции сброшены');
+  };
   setSceneMode(sceneMode || 'inspect');
+  updateSceneToolLocks();
 }
 function furnitureClass(name){
   const t = String(name || '').toLowerCase();
@@ -1275,7 +1307,12 @@ function setPresence(remote, opts){
   Object.keys(remote.actors || {}).forEach((k) => {
     const a = remote.actors[k];
     const cur = actors[k];
-    if (!cur || Number(a.ts || 0) >= Number(cur.ts || 0)) actors[k] = a;
+    if (!cur || Number(a.ts || 0) >= Number(cur.ts || 0)) {
+      actors[k] = Object.assign({}, cur || {}, a, {
+        x: a.x != null ? Number(a.x) : (cur && cur.x),
+        y: a.y != null ? Number(a.y) : (cur && cur.y),
+      });
+    }
   });
   const now = Date.now();
   Object.keys(actors).forEach((k) => {
@@ -1296,6 +1333,20 @@ function setPresence(remote, opts){
       text: e.text || ((e.display || e.login || '') + ' · ' + (e.pose || '')),
       ts: Number(e.ts || now),
     });
+    const login = String(e.login || '').toLowerCase();
+    if (login) {
+      const prev = actors[login] || {};
+      actors[login] = Object.assign({}, prev, {
+        login,
+        display: e.display || prev.display || login,
+        pose: e.pose || prev.pose || 'here',
+        object: e.object || '',
+        room: e.room || currentTab,
+        x: e.x != null ? Number(e.x) : prev.x,
+        y: e.y != null ? Number(e.y) : prev.y,
+        ts: Number(e.ts || now),
+      });
+    }
   }
   while (liveLog.length > 12) liveLog.shift();
   while (seenEventIds.size > 80) {
@@ -1336,6 +1387,22 @@ function ingestFlavorEvent(e){
     ts: Number(e.ts || Date.now()),
   });
   while (liveLog.length > 12) liveLog.shift();
+  const login = String(e.login || '').toLowerCase();
+  if (login) {
+    presence.actors = presence.actors || {};
+    const prev = presence.actors[login] || {};
+    presence.actors[login] = Object.assign({}, prev, {
+      login,
+      display: e.display || prev.display || login,
+      pose: e.pose || prev.pose || 'here',
+      object: e.object || '',
+      room: e.room || currentTab,
+      x: e.x != null ? Number(e.x) : prev.x,
+      y: e.y != null ? Number(e.y) : prev.y,
+      ts: Number(e.ts || Date.now()),
+    });
+    animatePresenceActor(presence.actors[login]);
+  }
 }
 
 function applyRealtimeActors(actors){
@@ -1344,13 +1411,38 @@ function applyRealtimeActors(actors){
   if (me && presence.actors && presence.actors[me] && !next[me]) {
     next[me] = presence.actors[me];
   } else if (me && presence.actors && presence.actors[me]) {
-    // keep fresher local pose if server is stale idle
     const local = presence.actors[me];
     const remote = next[me];
     if (remote && Number(local.ts || 0) > Number(remote.ts || 0)) next[me] = local;
   }
   presence.actors = next;
   presence.ts = Date.now();
+  syncPresenceAvatars();
+}
+
+function resolveObjectPos(objectName, kind){
+  let tx = lastInteractPos && lastInteractPos.x;
+  let ty = lastInteractPos && lastInteractPos.y;
+  const scene = document.querySelector('.scene.active');
+  if ((tx == null || ty == null) && scene) {
+    const objs = scene.querySelectorAll('.object,.furniture');
+    for (const o of objs) {
+      const lab = o.querySelector('.room-object-label') || o.querySelector('div');
+      const txt = String((lab && lab.textContent) || '').toLowerCase();
+      if (txt.includes(String(objectName||'').toLowerCase())) {
+        tx = parseFloat(o.style.left);
+        ty = parseFloat(o.style.top);
+        break;
+      }
+    }
+  }
+  if (tx == null || ty == null || isNaN(tx) || isNaN(ty)) {
+    tx = 40 + Math.random() * 20;
+    ty = 45 + Math.random() * 15;
+  }
+  const nearX = Math.max(4, Math.min(92, tx + (kind === 'bed' || kind === 'rest' ? 0 : (Math.random() < 0.5 ? -8 : 8))));
+  const nearY = Math.max(8, Math.min(88, ty + (kind === 'bed' || kind === 'rest' ? 4 : 0)));
+  return { x: nearX, y: nearY };
 }
 
 async function doFlavor(pose, objectName, kind){
@@ -1367,13 +1459,15 @@ async function doFlavor(pose, objectName, kind){
   if (window.__bltFlavorBusy) return;
   window.__bltFlavorBusy = true;
   startFlavorCooldown();
-  moveSelfToObject(pose, objectName, kind);
+  const pos = resolveObjectPos(objectName, kind || pose);
+  moveSelfToObject(pose, objectName, kind, pos);
   const me = (window.BLTHouseTwitch.user||{}).display || 'ты';
   const login = String((window.BLTHouseTwitch.user||{}).login||'').toLowerCase();
   const eventId = newEventId();
   if (!presence.actors) presence.actors = {};
   presence.actors[login] = {
-    login, display: me, pose, object: objectName || '', room: currentTab, ts: Date.now()
+    login, display: me, pose, object: objectName || '', room: currentTab,
+    x: pos.x, y: pos.y, ts: Date.now()
   };
   if (!seenEventIds.has(eventId)) {
     seenEventIds.add(eventId);
@@ -1384,15 +1478,15 @@ async function doFlavor(pose, objectName, kind){
   toast(me+' · '+pose+' · '+objectName);
   setFooter(me + (objectName ? ' · ' + objectName : ''));
   try{
+    const payload = {
+      pose, object: objectName, room: currentTab, text: '', eventId, idle: false,
+      x: pos.x, y: pos.y,
+    };
     if (useSupabaseAtmosphere()) {
-      await window.BLTHouseRealtime.publishFlavor({
-        pose, object: objectName, room: currentTab, text: '', eventId, idle: false,
-      });
+      await window.BLTHouseRealtime.publishFlavor(payload);
       setSync(true, defaultSyncLabel());
     } else {
-      const data = await window.BLTHouseExtPublishPresence({
-        pose, object: objectName, room: currentTab, text: '', eventId, idle: false,
-      });
+      const data = await window.BLTHouseExtPublishPresence(payload);
       setPresence(data);
       renderPresenceOnly();
       setSync(true, defaultSyncLabel());
@@ -1433,6 +1527,10 @@ function findSelfPersonEl(scene){
   if (!scene) return null;
   const t = window.BLTHouseTwitch || {};
   const login = String((t.user && t.user.login) || '').toLowerCase();
+  if (login) {
+    const byLogin = scene.querySelector('.room-person[data-presence-login="'+cssEsc(login)+'"]');
+    if (byLogin) return byLogin;
+  }
   const display = String((t.user && t.user.display) || '').toLowerCase();
   const people = scene.querySelectorAll('.room-person');
   for (const el of people) {
@@ -1443,39 +1541,103 @@ function findSelfPersonEl(scene){
   return null;
 }
 
-function moveSelfToObject(pose, objectName, kind){
-  const scene = document.querySelector('.scene.active');
-  if (!scene) return;
-  let tx = lastInteractPos && lastInteractPos.x;
-  let ty = lastInteractPos && lastInteractPos.y;
-  if (tx == null || ty == null) {
-    const objs = scene.querySelectorAll('.object,.furniture');
-    for (const o of objs) {
-      const lab = o.querySelector('.room-object-label') || o.querySelector('div');
-      const txt = String((lab && lab.textContent) || '').toLowerCase();
-      if (txt.includes(String(objectName||'').toLowerCase())) {
-        tx = parseFloat(o.style.left);
-        ty = parseFloat(o.style.top);
-        break;
-      }
+function findOrCreatePresenceAvatar(scene, actor){
+  if (!scene || !actor) return null;
+  const login = String(actor.login || '').toLowerCase();
+  if (!login) return null;
+  let el = scene.querySelector('.room-person[data-presence-login="'+cssEsc(login)+'"]');
+  if (el) return el;
+  const display = String(actor.display || login).toLowerCase();
+  const people = scene.querySelectorAll('.room-person');
+  for (const p of people) {
+    const nm = String((p.querySelector('.name') && p.querySelector('.name').textContent) || '').toLowerCase();
+    if (nm.includes(login) || (display && nm.includes(display))) {
+      p.dataset.presenceLogin = login;
+      return p;
     }
   }
-  if (tx == null || ty == null || isNaN(tx) || isNaN(ty)) return;
-  const el = findSelfPersonEl(scene);
+  el = document.createElement('div');
+  el.className = 'room-person presence-visitor guest';
+  el.dataset.presenceLogin = login;
+  el.dataset.personId = 'presence:' + login;
+  const x = actor.x != null ? Number(actor.x) : (20 + Math.random() * 50);
+  const y = actor.y != null ? Number(actor.y) : (40 + Math.random() * 30);
+  el.style.left = x + '%';
+  el.style.top = y + '%';
+  el.innerHTML = `<div class="body"></div><div class="name">${esc(actor.display || login)}</div><div class="state">${esc(actor.pose || 'здесь')}</div>`;
+  el.onclick = (ev) => {
+    if (sceneMode === 'move') return;
+    ev.stopPropagation();
+    openInteract(ev, actor.display || login, actor.pose || 'в панели');
+  };
+  scene.appendChild(el);
+  return el;
+}
+
+function animatePresenceActor(actor){
+  const scene = document.querySelector('.scene.active .mobile-room') || document.querySelector('.scene.active');
+  if (!scene || !actor) return;
+  const me = String((window.BLTHouseTwitch && window.BLTHouseTwitch.user && window.BLTHouseTwitch.user.login) || '').toLowerCase();
+  const login = String(actor.login || '').toLowerCase();
+  // Always animate remotes; self already moved locally in doFlavor
+  const el = findOrCreatePresenceAvatar(scene, actor);
   if (!el) return;
-  const ox = parseFloat(el.style.left) || 50;
-  const oy = parseFloat(el.style.top) || 50;
-  const nearX = Math.max(4, Math.min(92, tx + (ox < tx ? -8 : 8)));
-  const nearY = Math.max(8, Math.min(88, ty + (kind === 'bed' || pose === 'rest' ? 4 : 0)));
+  const st = el.querySelector('.state');
+  if (st) st.textContent = actor.pose === 'rest' ? 'отдыхает' : (actor.pose || 'здесь');
+  if (actor.x != null && actor.y != null && !isNaN(Number(actor.x)) && !isNaN(Number(actor.y))) {
+    if (login !== me) {
+      el.style.transition = 'left 0.45s ease, top 0.45s ease';
+      el.style.left = Number(actor.x) + '%';
+      el.style.top = Number(actor.y) + '%';
+      setTimeout(() => { el.style.transition = ''; }, 500);
+    }
+  }
+}
+
+function syncPresenceAvatars(){
+  const scene = document.querySelector('.scene.active .mobile-room') || document.querySelector('.scene.active');
+  if (!scene) return;
+  const actors = Object.values((presence && presence.actors) || {});
+  const live = new Set();
+  actors.forEach(a => {
+    const login = String(a.login || '').toLowerCase();
+    if (!login) return;
+    if (a.room && a.room !== currentTab && a.pose === 'here') {
+      // still show in bar, but only animate if same room or has coords
+    }
+    live.add(login);
+    animatePresenceActor(a);
+  });
+  scene.querySelectorAll('.room-person.presence-visitor').forEach(el => {
+    const login = String(el.dataset.presenceLogin || '').toLowerCase();
+    if (login && !live.has(login)) el.remove();
+  });
+}
+
+function moveSelfToObject(pose, objectName, kind, forcedPos){
+  const scene = document.querySelector('.scene.active .mobile-room') || document.querySelector('.scene.active');
+  if (!scene) return null;
+  const pos = forcedPos || resolveObjectPos(objectName, kind || pose);
+  let el = findSelfPersonEl(scene);
+  if (!el && twitchLoggedIn()) {
+    const u = window.BLTHouseTwitch.user || {};
+    el = findOrCreatePresenceAvatar(scene, {
+      login: String(u.login || '').toLowerCase(),
+      display: u.display || u.login,
+      pose, x: pos.x, y: pos.y,
+    });
+  }
+  if (!el) return null;
   el.style.transition = 'left 0.45s ease, top 0.45s ease';
-  el.style.left = nearX + '%';
-  el.style.top = nearY + '%';
+  el.style.left = pos.x + '%';
+  el.style.top = pos.y + '%';
   const st = el.querySelector('.state');
   if (st) st.textContent = pose === 'rest' ? 'отдыхает' : (pose || 'здесь');
-  const id = el.dataset.personId || (house && house.ownerName) || 'self';
-  visualPositions['person:' + id] = { x: nearX, y: nearY };
+  const id = el.dataset.personId || el.dataset.presenceLogin || 'self';
+  visualPositions['person:' + id] = { x: pos.x, y: pos.y };
   saveVisualPositions();
   setTimeout(() => { el.style.transition = ''; }, 500);
+  return pos;
 }
 
 function drawPresence(scene){
@@ -1484,7 +1646,6 @@ function drawPresence(scene){
   bar.className='presence-bar';
   const actors=Object.values((presence&&presence.actors)||{});
   if(!actors.length){
-    // Quiet empty — no overlapping “никого” chip when guest/anonymous
     return;
   }
   bar.innerHTML=actors.map(a=>{
@@ -1501,10 +1662,19 @@ function renderPresenceOnly(){
   const old=scene.querySelector('.presence-bar');
   if(old) old.remove();
   drawPresence(scene);
+  syncPresenceAvatars();
   const log=document.getElementById('presenceLog');
   if(log){
-    const ev = liveLog.slice(-6).reverse();
-    if (ev.length) log.innerHTML = ev.map(e=>esc(e.text||'')).join('<br>');
+    const actors = Object.values((presence && presence.actors) || {});
+    const online = actors.map(a => {
+      const bit = [a.display || a.login, a.pose && a.pose !== 'here' ? a.pose : 'онлайн', a.object].filter(Boolean).join(' · ');
+      return '<div style="margin:2px 0">● ' + esc(bit) + '</div>';
+    }).join('');
+    const ev = liveLog.slice(-5).reverse();
+    const act = ev.length
+      ? '<div style="margin-top:8px;color:#8f887c">Активность</div>' + ev.map(e=>'<div>'+esc(e.text||'')+'</div>').join('')
+      : '';
+    if (online) log.innerHTML = online + act;
     else if (twitchLoggedIn()) log.textContent = 'Ты в панели · кликни объект, чтобы появилось действие';
     else log.textContent = 'Войди Twitch, чтобы тебя было видно';
   }
@@ -1523,7 +1693,9 @@ async function pollPresenceOnce(){
         idle: true,
         pose: (mine && mine.pose) || 'here',
         object: (mine && mine.object) || '',
-        room: currentTab
+        room: currentTab,
+        x: mine && mine.x != null ? mine.x : null,
+        y: mine && mine.y != null ? mine.y : null,
       }).then(d=>{
         if (!d) return;
         setPresence(d);
@@ -1794,6 +1966,10 @@ function copyCmd(cmd){ navigator.clipboard?.writeText(cmd); toast('Скопир�
 function toast(text){ const el=document.getElementById('toast'); el.textContent=text; el.classList.add('show'); clearTimeout(window.__toast); window.__toast=setTimeout(()=>el.classList.remove('show'),2400); }
 function setFooter(t){ document.getElementById('footerState').textContent=t; }
 function esc(s){ return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function cssEsc(s){
+  try { return (window.CSS && CSS.escape) ? CSS.escape(String(s||'')) : String(s||'').replace(/[^a-zA-Z0-9_-]/g, '\\$&'); }
+  catch (e) { return String(s || ''); }
+}
 function roman(n){ return ({1:'I',2:'II',3:'III',4:'IV',5:'V'})[n]||String(n||'—'); }
 
 function renderAll(){
@@ -1804,6 +1980,7 @@ function renderAll(){
   renderScene();
   renderSide();
   renderPresenceOnly();
+  updateSceneToolLocks();
 }
 
 async function refresh(force){

@@ -34,6 +34,8 @@
         pose: m.pose || "here",
         object: m.object || "",
         room: m.room || "",
+        x: m.x != null ? Number(m.x) : null,
+        y: m.y != null ? Number(m.y) : null,
         ts: Number(m.ts || Date.now()),
       };
     });
@@ -120,6 +122,8 @@
         object: "",
         room: "",
         text: "",
+        x: null,
+        y: null,
         ts: Date.now(),
         id: payload.eventId || payload.id || ("e" + Date.now()),
       }, payload || {});
@@ -142,6 +146,8 @@
             pose: row.pose,
             object: row.object || "",
             room: row.room || "",
+            x: row.x,
+            y: row.y,
             ts: row.ts,
           });
         } catch (e) {
@@ -161,6 +167,8 @@
         pose: row.pose,
         object: row.object || "",
         room: row.room || "",
+        x: row.x,
+        y: row.y,
         text: row.text || (display + " · " + row.pose + (row.object ? " · " + row.object : "")),
         ts: row.ts,
       };
