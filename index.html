@@ -5,11 +5,11 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <base href="/BLTHouse/">
 <title>BLT House</title>
-<script src="config.js?v=rt9"></script>
+<script src="config.js?v=rt10"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="twitch-auth.js?v=rt9"></script>
-<script src="extension-bridge.js?v=rt9"></script>
-<script src="presence-realtime.js?v=rt9"></script>
+<script src="twitch-auth.js?v=rt10"></script>
+<script src="extension-bridge.js?v=rt10"></script>
+<script src="presence-realtime.js?v=rt10"></script>
 <style>
 :root{
   --bg:#0d0d0c;--panel:#171614;--panel2:#201e19;--panel3:#29251e;
@@ -117,6 +117,9 @@ header{
 .action{width:100%;padding:9px 10px;text-align:left;border:1px solid #524a39;background:linear-gradient(#342f24,#24221d);color:#d7c9ac}
 .action:hover{border-color:#a98a57;background:linear-gradient(#463d2d,#29261f);color:#f0ddb5}
 .action:disabled{opacity:.45;cursor:not-allowed}
+.action.selected{border-color:#d4a84a;background:linear-gradient(#5a4a2e,#3a3224);color:#ffe9b8;box-shadow:inset 0 0 0 1px #c9a45a}
+.forge-types{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.forge-types .action{text-align:center;padding:8px 6px;font-size:12px}
 .cost{float:right;color:#d0ac69;font-size:11px}
 .hint{display:block;color:#8f887c;font:9px Arial,sans-serif;margin-top:3px}
 .notice{border-left:3px solid #a88651;background:#211e17;padding:9px 10px;font:11px Arial,sans-serif;line-height:1.45;color:#c4b9a5}
@@ -534,6 +537,7 @@ const TAB_DEFS = [
 
 let house = null;
 let currentTab = 'common';
+let selectedForgeType = null;
 let pendingAction = null;
 let pollTimer = null;
 let lastRevision = -1;
@@ -2173,16 +2177,25 @@ function renderSide(){
       <div style="margin-top:12px" class="btns">${actionsHtml('family')}</div>`;
   } else if(currentTab==='workshop'){
     const fallbackTypes='шлем, броня, нагрудник, ноги, руки, плащ, конь, седло, одноручное, двуручное, древковое, лук, арбалет, праща, стрелы, болты, камни, метательное, щит, знамя'.split(',').map(s=>s.trim()).filter(Boolean);
-    const types=(house.forgeItemTypes&&house.forgeItemTypes.length)?house.forgeItemTypes:fallbackTypes;
-    const typeBtns=types.map(t=>`<button type="button" class="action" ${house.isOwnerViewer?'':'disabled'} onclick="postAction('forge_craft',{target:${JSON.stringify(t)},value:${JSON.stringify(t)}})">${esc(t)}</button>`).join('');
+    const rawTypes=(house.forgeItemTypes&&house.forgeItemTypes.length)?house.forgeItemTypes:fallbackTypes;
+    const types=rawTypes.map(t=> typeof t==='string' ? t : (t && (t.name||t.Name||t.id||t.Id)) || '').map(s=>String(s).trim()).filter(Boolean);
+    if (selectedForgeType && !types.includes(selectedForgeType)) selectedForgeType = null;
+    const typeBtns=types.map(t=>{
+      const sel = selectedForgeType===t ? ' selected' : '';
+      return `<button type="button" class="action${sel}" onclick="selectForgeType(${JSON.stringify(t)})">${esc(t)}</button>`;
+    }).join('');
+    const canCraft = !!(house.isOwnerViewer && selectedForgeType);
     html=`<div class="kicker">Кузница (Blacksmithing New)</div>
       <div class="grid">
         <div class="stat"><span>УРОВЕНЬ</span><b>${roman(house.workshopLevel||0)}</b></div>
         <div class="stat"><span>НА СКЛАДЕ</span><b>${(house.storageItems||[]).length}</b></div>
       </div>
-      <div class="notice" style="margin-top:8px">Типы как в чате BlacksmithingNew. Нужна построенная мастерская.</div>
-      <div style="margin-top:12px" class="kicker">Скрафтить</div>
-      <div class="btns">${typeBtns||'<div class="notice">Типы появятся из игры</div>'}</div>
+      <div class="notice" style="margin-top:8px">1) Нажми тип → подсветится. 2) «Скрафтить». Нужна мастерская.</div>
+      <div style="margin-top:12px" class="kicker">Тип предмета ${selectedForgeType?'· выбрано: '+esc(selectedForgeType):'· не выбран'}</div>
+      <div class="forge-types">${typeBtns||'<div class="notice">Нет типов</div>'}</div>
+      <div style="margin-top:12px" class="btns">
+        <button type="button" class="action" ${canCraft?'':'disabled'} onclick="craftSelectedForgeType()">Скрафтить${selectedForgeType?' «'+esc(selectedForgeType)+'»':''}</button>
+      </div>
       <div style="margin-top:12px" class="btns">${actionsHtml('workshop')}</div>`;
   } else if(currentTab==='yard'){
     html=`<div class="kicker">Животные</div><div class="list">${yardList()}</div>
@@ -2290,12 +2303,28 @@ function switchTab(id){
 function onAction(a){
   if(!house.isOwnerViewer){ toast('Войди Twitch как владелец'); return; }
   if(!a.available){ toast(a.disabledReason||'Недоступно'); return; }
-  if(a.id==='forge_craft'){ switchTab('workshop'); toast('Выбери тип предмета'); return; }
+  if(a.id==='forge_craft'){
+    switchTab('workshop');
+    toast(selectedForgeType ? ('Тип уже выбран: '+selectedForgeType+' — жми «Скрафтить»') : 'Сначала нажми тип предмета в списке (подсветится)');
+    return;
+  }
   if(a.id==='invite' || a.id==='rename'){
     openPrompt(a);
     return;
   }
   openConfirm(a);
+}
+
+function selectForgeType(t){
+  selectedForgeType = String(t||'').trim() || null;
+  renderSide();
+  toast(selectedForgeType ? ('Выбрано: '+selectedForgeType) : 'Тип сброшен');
+}
+
+async function craftSelectedForgeType(){
+  if(!selectedForgeType){ toast('Сначала выбери тип в списке'); return; }
+  if(!house.isOwnerViewer){ toast('Войди Twitch как владелец'); return; }
+  await postAction('forge_craft', { target: selectedForgeType, value: selectedForgeType });
 }
 
 function openConfirm(a){
