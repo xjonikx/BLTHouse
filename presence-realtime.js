@@ -73,6 +73,10 @@
         if (onUpdate) onUpdate({ kind: "flavor", event: payload });
       });
 
+      channel.on("broadcast", { event: "layout" }, ({ payload }) => {
+        if (onUpdate) onUpdate({ kind: "layout", layout: payload });
+      });
+
       channel.on("presence", { event: "sync" }, () => emitActors());
       channel.on("presence", { event: "join" }, () => emitActors());
       channel.on("presence", { event: "leave" }, () => emitActors());
@@ -174,6 +178,13 @@
       };
       await channel.send({ type: "broadcast", event: "flavor", payload: msg });
       return { ok: true, event: msg };
+    },
+
+    async publishLayout(payload) {
+      if (!channel) throw new Error("realtime_not_connected");
+      const row = Object.assign({ ts: Date.now(), houseId }, payload || {});
+      await channel.send({ type: "broadcast", event: "layout", payload: row });
+      return { ok: true, layout: row };
     },
   };
 })();
