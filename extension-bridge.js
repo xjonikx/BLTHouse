@@ -1,9 +1,15 @@
-/* BLTHouse Pages: click → Worker queue → game; gold via /state after action */
+/* BLTHouse Pages: click → Supabase (preferred) or Worker queue → game; gold via state */
 (function () {
   const cfg = () => window.BLT_HOUSE_EXT || {};
 
   function queueBase() {
     return String(cfg().ebsUrl || cfg().queueUrl || "").replace(/\/$/, "");
+  }
+
+  function supabaseQueue() {
+    return window.BLTHouseSupabaseQueue && window.BLTHouseSupabaseQueue.enabled && window.BLTHouseSupabaseQueue.enabled()
+      ? window.BLTHouseSupabaseQueue
+      : null;
   }
 
   function newActionId() {
@@ -13,7 +19,7 @@
     return "a" + Date.now() + "-" + Math.random().toString(16).slice(2);
   }
 
-  async function enqueueAction(messageObj) {
+  async function enqueueActionWorker(messageObj) {
     const base = queueBase();
     if (!base) throw new Error("ebsUrl/queueUrl not set in config.js");
     const channel = String(cfg().broadcasterId || cfg().channel || "default");
@@ -81,21 +87,29 @@
     );
 
     const c = cfg();
+    const sb = supabaseQueue();
+    if (sb) {
+      return await sb.enqueueAction(messageObj);
+    }
 
     // When Worker URL is configured, NEVER fall back to localGameApi after a failed/
     // timed-out enqueue — the command may already be accepted (idempotent retry only).
     if (queueBase()) {
-      return await enqueueAction(messageObj);
+      return await enqueueActionWorker(messageObj);
     }
 
     if (c.localGameApi) {
       return await publishLocal(messageObj);
     }
 
-    throw new Error("No queueUrl/ebsUrl in config.js");
+    throw new Error("Set supabaseUrl+supabaseAnonKey or ebsUrl in config.js");
   };
 
   window.BLTHouseExtFetchState = async function (houseId, viewer) {
+    const sb = supabaseQueue();
+    if (sb) {
+      return await sb.fetchState(houseId, viewer);
+    }
     const base = queueBase();
     if (!base || !houseId) return null;
     const twitch = window.BLTHouseTwitch || {};
@@ -130,6 +144,11 @@
     } else {
       prevTs = prevTsOrOpts;
       limit = timeoutMs || 8000;
+    }
+
+    const sb = supabaseQueue();
+    if (sb) {
+      return await sb.waitState(houseId, { actionId, prevTs, timeoutMs: limit, viewer: who });
     }
 
     const t0 = Date.now();
