@@ -5,11 +5,8 @@ window.BLT_HOUSE_EXT = {
   localGameApi: "",
   preferQueue: true,
 
-  // Twitch OAuth
+  // Twitch Application (OAuth Implicit) — Redirect: https://xjonikx.github.io/BLTHouse/
+  // Same value → Cloudflare Worker Variable TWITCH_CLIENT_ID
   twitchClientId: "jikzu97y2o467loo3th2ggw4ihi8xe",
-  twitchRedirectUri: "https://xjonikx.github.io/BLTHouse/",
-
-  // Supabase Realtime (atmosphere) — Publishable only, NEVER secret on Pages
-  supabaseUrl: "https://lqtamumrzdlspcxfldjj.supabase.co",
-  supabaseAnonKey: "sb_publishable_IqzgEZTYV3d8oLP3ii2dZw_ygwWLgB0",
+  twitchRedirectUri: "https://xjonikx.github.io/BLTHouse",
 };

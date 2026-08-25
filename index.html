@@ -5,11 +5,11 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <base href="/BLTHouse/">
 <title>BLT House</title>
-<script src="config.js?v=rt8"></script>
+<script src="config.js?v=rt9"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="twitch-auth.js?v=rt8"></script>
-<script src="extension-bridge.js?v=rt8"></script>
-<script src="presence-realtime.js?v=rt8"></script>
+<script src="twitch-auth.js?v=rt9"></script>
+<script src="extension-bridge.js?v=rt9"></script>
+<script src="presence-realtime.js?v=rt9"></script>
 <style>
 :root{
   --bg:#0d0d0c;--panel:#171614;--panel2:#201e19;--panel3:#29251e;
@@ -740,7 +740,9 @@ async function fetchHouse(){
 function applyPanelHouse(raw){
   const next = normalize(raw);
   if (isQueueMode()) {
-    next.isOwnerViewer = !!(window.BLTHouseTwitch && window.BLTHouseTwitch.isOwner(next));
+    const twitchSaysOwner = !!(window.BLTHouseTwitch && window.BLTHouseTwitch.isOwner(next));
+    // Keep game DTO inventory when Twitch login matches owner (do not wipe on race).
+    next.isOwnerViewer = twitchSaysOwner || !!next.isOwnerViewer;
     if (!next.isOwnerViewer) {
       next.gold = 0;
       next.heroInventory = [];
@@ -2170,13 +2172,15 @@ function renderSide(){
       <div style="margin-top:12px" class="kicker">Гости</div><div class="list">${peopleList(house.guests)||'<div class="list-item">Нет гостей</div>'}</div>
       <div style="margin-top:12px" class="btns">${actionsHtml('family')}</div>`;
   } else if(currentTab==='workshop'){
-    const types=(house.forgeItemTypes||[]).slice(0,12);
-    const typeBtns=types.map(t=>`<button type="button" class="action" ${house.isOwnerViewer?'':'disabled'} onclick="postAction('forge_craft',{target:${JSON.stringify(t)}})">${esc(t)}</button>`).join('');
-    html=`<div class="kicker">Кузница</div>
+    const fallbackTypes='шлем, броня, нагрудник, ноги, руки, плащ, конь, седло, одноручное, двуручное, древковое, лук, арбалет, праща, стрелы, болты, камни, метательное, щит, знамя'.split(',').map(s=>s.trim()).filter(Boolean);
+    const types=(house.forgeItemTypes&&house.forgeItemTypes.length)?house.forgeItemTypes:fallbackTypes;
+    const typeBtns=types.map(t=>`<button type="button" class="action" ${house.isOwnerViewer?'':'disabled'} onclick="postAction('forge_craft',{target:${JSON.stringify(t)},value:${JSON.stringify(t)}})">${esc(t)}</button>`).join('');
+    html=`<div class="kicker">Кузница (Blacksmithing New)</div>
       <div class="grid">
         <div class="stat"><span>УРОВЕНЬ</span><b>${roman(house.workshopLevel||0)}</b></div>
         <div class="stat"><span>НА СКЛАДЕ</span><b>${(house.storageItems||[]).length}</b></div>
       </div>
+      <div class="notice" style="margin-top:8px">Типы как в чате BlacksmithingNew. Нужна построенная мастерская.</div>
       <div style="margin-top:12px" class="kicker">Скрафтить</div>
       <div class="btns">${typeBtns||'<div class="notice">Типы появятся из игры</div>'}</div>
       <div style="margin-top:12px" class="btns">${actionsHtml('workshop')}</div>`;
@@ -2443,8 +2447,9 @@ async function startAtmosphere(){
         }
       },
     });
-    setSync(true, supabaseOk ? 'Онлайн' : defaultSyncLabel());
+    setSync(true, isOwnerNow() ? 'Владелец · онлайн' : (supabaseOk ? 'Онлайн' : defaultSyncLabel()));
     if (!supabaseOk) setFooter('Realtime не подключился — запасной канал Worker');
+    else if (isOwnerNow()) setFooter('Владелец · очередь в игру');
   } else if (useSupabaseAtmosphere() && !twitchLoggedIn()) {
     setFooter('Войди Twitch для атмосферы');
   }
