@@ -5,12 +5,12 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <base href="/BLTHouse/">
 <title>BLT House</title>
-<script src="config.js?v=rt14"></script>
+<script src="config.js?v=rt16"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="supabase-queue.js?v=rt14"></script>
-<script src="twitch-auth.js?v=rt14"></script>
-<script src="extension-bridge.js?v=rt14"></script>
-<script src="presence-realtime.js?v=rt14"></script>
+<script src="supabase-queue.js?v=rt16"></script>
+<script src="twitch-auth.js?v=rt16"></script>
+<script src="extension-bridge.js?v=rt16"></script>
+<script src="presence-realtime.js?v=rt16"></script>
 <style>
 :root{
   --bg:#0d0d0c;--panel:#171614;--panel2:#201e19;--panel3:#29251e;
@@ -558,7 +558,8 @@ const TAB_DEFS = [
   {id:'family', type:'family', label:'Семья'},
   {id:'workshop', type:'workshop', label:'Мастерская'},
   {id:'yard', type:'yard', label:'Двор'},
-  {id:'shop', type:'shop', label:'Магазин'},
+  {id:'shop_goods', type:'shop_goods', label:'Магазин Goods'},
+  {id:'shop_clothes', type:'shop_clothes', label:'Магазин одежды'},
   {id:'storage', type:'storage', label:'Хранилище'},
   {id:'history', type:'history', label:'История'},
 ];
@@ -1005,8 +1006,12 @@ function mapPerson(p){
 function roomUnlocked(type){
   const r = (house.rooms||[]).find(x=>x.type===type);
   if(type==='common'||type==='family'||type==='storage'||type==='history') return r ? r.unlocked!==false : true;
-  if(type==='shop') return roomUnlocked('yard') || !!(house.yardLevel);
+  if(type==='shop'||type==='shop_goods'||type==='shop_clothes') return roomUnlocked('yard') || !!(house.yardLevel);
   return !!(r && r.unlocked);
+}
+
+function isShopTab(tab){
+  return tab==='shop'||tab==='shop_goods'||tab==='shop_clothes';
 }
 
 function showBoot(title, msg){
@@ -1467,7 +1472,7 @@ function renderScene(){
   }
   canvas.appendChild(scene);
   drawPresence(scene);
-  const labels={common:'Общая комната',family:'Семейная зона',workshop:'Мастерская',yard:'Двор',shop:'Магазин',storage:'Хранилище',history:'История'};
+  const labels={common:'Общая комната',family:'Семейная зона',workshop:'Мастерская',yard:'Двор',shop_goods:'Магазин Goods',shop_clothes:'Магазин одежды',shop:'Магазин',storage:'Хранилище',history:'История'};
   document.getElementById('sceneBadge').textContent=
     `${labels[currentTab]||currentTab} · ${house.residentsCount||0} жильцов · ${house.guestsCount||0} гостей`;
   document.getElementById('sceneStatus').textContent=
@@ -1497,9 +1502,14 @@ function buildSceneContent(scene, tab){
     makeObject(scene, 'Конюшня '+(house.stableLevel?roman(house.stableLevel):'—'), (house.mountsCount||0)+' маунтов', 12, 52, iconUrl('stable'));
     (house.pets||[]).forEach((p,i)=>makeObject(scene, p.Name||p.name||'Питомец', p.State||p.state||'', 45+i*8, 58+i*4, iconUrl('pet')));
     (house.mounts||[]).forEach((m,i)=>makeObject(scene, m.Name||m.name||'Маунт', m.Bond||m.bond||'', 60+i*5, 50+i*5, iconUrl('horse')));
-  } else if(tab==='shop'){
-    makeObject(scene, 'Рынок', house.shopSettlementName||house.locationName||'—', 20, 40, iconUrl('misc'));
-    makeObject(scene, 'Товары', String((house.shopItems||[]).length)+' поз.', 55, 48, iconUrl('chest'));
+  } else if(tab==='shop_goods'||tab==='shop'){
+    const n=(house.shopItems||[]).filter(it=>String(it.ShopKind||it.shopKind||'goods').toLowerCase()!=='clothes').length;
+    makeObject(scene, 'Рынок Goods', house.shopSettlementName||house.locationName||'—', 20, 40, iconUrl('misc'));
+    makeObject(scene, 'Товары', String(n)+' поз.', 55, 48, iconUrl('chest'));
+  } else if(tab==='shop_clothes'){
+    const n=(house.shopItems||[]).filter(it=>String(it.ShopKind||it.shopKind||'').toLowerCase()==='clothes').length;
+    makeObject(scene, 'Лавка одежды', house.shopSettlementName||house.locationName||'—', 20, 40, iconUrl('armor'));
+    makeObject(scene, 'Одежда', String(n)+' поз.', 55, 48, iconUrl('chest'));
   } else if(tab==='storage'){
     makeObject(scene, 'Сундук', (house.storageUsed||0)+'/'+(house.storageCapacity||0), 18, 55, iconUrl('chest'));
     if (!(house.storageItems||[]).length) {
@@ -2260,13 +2270,15 @@ function inspectPerson(p){
 
 function renderSide(){
   bindRightContentUi();
-  const titles={common:'Общая',family:'Семья',workshop:'Мастерская',yard:'Двор',shop:'Магазин',storage:'Хранилище',history:'История'};
+  const titles={common:'Общая',family:'Семья',workshop:'Мастерская',yard:'Двор',shop_goods:'Магазин Goods',shop_clothes:'Магазин одежды',shop:'Магазин',storage:'Хранилище',history:'История'};
   const descs={
     common:'Главная комната дома. Жильцы, гости и общие объекты.',
     family:'Жильцы и семейная часть дома.',
     workshop:'Кузница — те же типы и Settings, что !BlacksmithingNew.',
     yard:'Животные, маунты и хозяйство.',
-    shop:'Рынок города: Goods + гражданская одежда.',
+    shop_goods:'Торговые Goods с рынка города дома (полный список).',
+    shop_clothes:'Гражданская одежда с рынка города дома (полный список).',
+    shop:'Рынок города.',
     storage:'Склад BLT / Goods и инвентарь BLT.',
     history:'Хроника изменений дома.',
   };
@@ -2328,11 +2340,18 @@ function renderSide(){
   } else if(currentTab==='yard'){
     html=`<div class="kicker">Животные</div><div class="list">${yardList()}</div>
       <div style="margin-top:12px" class="btns">${actionsHtml('yard')}</div>`;
-  } else if(currentTab==='shop'){
-    html=`<div class="kicker">Магазин · ${esc(house.shopSettlementName||house.locationName||'—')}</div>
-      <div class="notice">${esc(house.shopStatus||'Goods и гражданская одежда с рынка города дома.')}</div>
-      <div style="margin-top:12px" class="list">${shopList()}</div>
-      <div style="margin-top:12px" class="btns">${actionsHtml('shop')}</div>`;
+  } else if(currentTab==='shop_goods'||currentTab==='shop'){
+    const n=(house.shopItems||[]).filter(it=>String(it.ShopKind||it.shopKind||'goods').toLowerCase()!=='clothes').length;
+    html=`<div class="kicker">Магазин Goods · ${esc(house.shopSettlementName||house.locationName||'—')}</div>
+      <div class="notice">${esc(house.shopStatus||'Торговые Goods с рынка города.')} · в списке ${n}</div>
+      <div style="margin-top:12px" class="list">${shopList('goods')}</div>
+      <div style="margin-top:12px" class="btns">${actionsHtml('shop_goods')}</div>`;
+  } else if(currentTab==='shop_clothes'){
+    const n=(house.shopItems||[]).filter(it=>String(it.ShopKind||it.shopKind||'').toLowerCase()==='clothes').length;
+    html=`<div class="kicker">Магазин одежды · ${esc(house.shopSettlementName||house.locationName||'—')}</div>
+      <div class="notice">${esc(house.shopStatus||'Гражданская одежда с рынка города.')} · в списке ${n}</div>
+      <div style="margin-top:12px" class="list">${shopList('clothes')}</div>
+      <div style="margin-top:12px" class="btns">${actionsHtml('shop_clothes')}</div>`;
   } else if(currentTab==='storage'){
     const pct=house.storageCapacity?Math.round(100*(house.storageUsed||0)/house.storageCapacity):0;
     html=`<div class="kicker">Склад дома</div>
@@ -2409,29 +2428,30 @@ function storageGoodsList(){
     return `<div class="list-item"><img class="ico" src="assets/icons/misc.svg" alt=""><div class="txt"><b>${esc(name)}</b><small>Goods · ×${count}${price?' · ~'+price+'/шт':''}</small></div>${btns}</div>`;
   }).join('')||'<div class="list-item">Пусто — купите во вкладке Магазин</div>';
 }
-function shopList(){
+function shopList(kind){
   const owner = isPanelOwner();
-  const items = house.shopItems||[];
-  if (!items.length) return '<div class="list-item">'+(esc(house.shopStatus)||'Нет товаров на рынке')+'</div>';
-  const goods = items.filter(it => String(it.ShopKind||it.shopKind||'goods').toLowerCase() !== 'clothes');
-  const clothes = items.filter(it => String(it.ShopKind||it.shopKind||'').toLowerCase() === 'clothes');
-  const render = (arr, title) => {
-    if (!arr.length) return '';
-    return `<div class="kicker" style="margin-top:8px">${esc(title)}</div>` + arr.map((it,i)=>{
-      const id=it.ItemStringId||it.itemStringId||'';
-      const name=it.Name||it.name||id;
-      const price=it.UnitPrice||it.unitPrice||0;
-      const avail=it.Available||it.available||0;
-      const kind=it.ShopKind||it.shopKind||'goods';
-      const globalIdx = items.indexOf(it);
-      const inspect=`<button type="button" class="btn-inspect" data-ui="inspect" data-src="shop" data-idx="${escAttr(String(globalIdx))}">Осмотреть</button>`;
-      const btns=`<span class="row-acts">${inspect}${owner&&id?`
-        <button type="button" class="btn-sell" data-ui="act" data-action="buy_shop_item" data-target="${escAttr(String(id))}" data-value="1">Купить · ${price}</button>`:''}
-      </span>`;
-      return `<div class="list-item"><img class="ico" src="${kind==='clothes'?'assets/icons/armor.svg':'assets/icons/misc.svg'}" alt=""><div class="txt"><b>${esc(name)}</b><small>${esc(kind)} · ${esc(id)} · на рынке ${avail} · цена ${price}</small></div>${btns}</div>`;
-    }).join('');
-  };
-  return render(goods, 'Goods') + render(clothes, 'Гражданская одежда');
+  const all = house.shopItems||[];
+  const wantClothes = String(kind||'').toLowerCase() === 'clothes';
+  const items = all.filter(it => {
+    const k = String(it.ShopKind||it.shopKind||'goods').toLowerCase();
+    return wantClothes ? k === 'clothes' : k !== 'clothes';
+  });
+  if (!items.length) {
+    return '<div class="list-item">'+(esc(house.shopStatus)||(wantClothes?'Нет гражданской одежды на рынке':'Нет Goods на рынке'))+'</div>';
+  }
+  return items.map((it)=>{
+    const id=it.ItemStringId||it.itemStringId||'';
+    const name=it.Name||it.name||id;
+    const price=it.UnitPrice||it.unitPrice||0;
+    const avail=it.Available||it.available||0;
+    const sk=it.ShopKind||it.shopKind||'goods';
+    const globalIdx = all.indexOf(it);
+    const inspect=`<button type="button" class="btn-inspect" data-ui="inspect" data-src="shop" data-idx="${escAttr(String(globalIdx))}">Осмотреть</button>`;
+    const btns=`<span class="row-acts">${inspect}${owner&&id?`
+      <button type="button" class="btn-sell" data-ui="act" data-action="buy_shop_item" data-target="${escAttr(String(id))}" data-value="1">Купить · ${price}</button>`:''}
+    </span>`;
+    return `<div class="list-item"><img class="ico" src="${wantClothes?'assets/icons/armor.svg':'assets/icons/misc.svg'}" alt=""><div class="txt"><b>${esc(name)}</b><small>${esc(sk)} · ${esc(id)} · на рынке ${avail} · цена ${price}</small></div>${btns}</div>`;
+  }).join('');
 }
 function heroInventoryList(){
   const owner = isPanelOwner();
@@ -2461,7 +2481,14 @@ function historyList(){
 }
 
 function actionsHtml(room){
-  const acts=(house.actions||[]).filter(a=>!a.room || a.room===room || (room==='common'&&a.room==='overview'));
+  const shopTab = isShopTab(room);
+  const acts=(house.actions||[]).filter(a=>{
+    if (!a.room) return true;
+    if (a.room===room) return true;
+    if (room==='common'&&a.room==='overview') return true;
+    if (shopTab && a.room==='shop') return true;
+    return false;
+  });
   if(!acts.length) return '<div class="notice">Нет доступных действий</div>';
   const owner = isPanelOwner();
   return acts.map(a=>{
@@ -2587,7 +2614,7 @@ function onAction(a){
     return;
   }
   if(a.id==='refresh_shop'){
-    switchTab('shop');
+    if (currentTab!=='shop_clothes') switchTab('shop_goods');
     postAction('refresh_shop');
     return;
   }
