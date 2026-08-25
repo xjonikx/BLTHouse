@@ -5,12 +5,12 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <base href="/BLTHouse/">
 <title>BLT House</title>
-<script src="config.js?v=rt21"></script>
+<script src="config.js?v=rt23"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="supabase-queue.js?v=rt21"></script>
-<script src="twitch-auth.js?v=rt21"></script>
-<script src="extension-bridge.js?v=rt21"></script>
-<script src="presence-realtime.js?v=rt21"></script>
+<script src="supabase-queue.js?v=rt23"></script>
+<script src="twitch-auth.js?v=rt23"></script>
+<script src="extension-bridge.js?v=rt23"></script>
+<script src="presence-realtime.js?v=rt23"></script>
 <style>
 :root{
   --bg:#0d0d0c;--panel:#171614;--panel2:#201e19;--panel3:#29251e;
@@ -582,7 +582,8 @@ let flavorCdUntil = 0;
 let walkCdUntil = 0;
 let flavorCdTimer = null;
 let lastGameTs = 0;
-const GAME_OFFLINE_MS = 90000;
+/** Game heartbeat ~30s; reject queue if state ts older than this. */
+const GAME_OFFLINE_MS = 40000;
 let gameStatusTimer = null;
 let sceneMode = 'inspect';
 let dragState = null;
@@ -680,16 +681,58 @@ function setSync(ok, label){
   if (ok) dot.classList.remove('off'); else dot.classList.add('off');
   lab.textContent = label;
 }
+function normalizeGameTs(ts){
+  let n = Number(ts || 0) || 0;
+  if (n > 0 && n < 1e12) n *= 1000;
+  return n;
+}
+function gameTsAgeMs(ts){
+  const n = normalizeGameTs(ts);
+  if (!n) return Infinity;
+  return Date.now() - n;
+}
+function isTsFresh(ts){
+  const age = gameTsAgeMs(ts);
+  return age >= 0 && age < GAME_OFFLINE_MS;
+}
 function noteGameTs(ts){
-  const n = Number(ts || 0) || 0;
+  const n = normalizeGameTs(ts);
   if (n > lastGameTs) lastGameTs = n;
 }
 function isGameOnline(){
   if (!lastGameTs) return false;
-  // ts from game is unix ms
-  const age = Date.now() - lastGameTs;
-  return age >= 0 && age < GAME_OFFLINE_MS;
+  return isTsFresh(lastGameTs);
 }
+function actionNeedsGame(action){
+  return !!String(action || '').trim();
+}
+async function verifyGameOnlineFresh(){
+  const {houseId, viewer} = parseRoute();
+  if (!houseId || typeof window.BLTHouseExtFetchState !== 'function') return isGameOnline();
+  try {
+    const packed = await window.BLTHouseExtFetchState(houseId, viewer);
+    if (!packed || !packed.ts) return false;
+    noteGameTs(packed.ts);
+    return isTsFresh(packed.ts);
+  } catch (e) {
+    return false;
+  }
+}
+function canRunGameActions(){
+  if (!isPanelOwner()) return false;
+  if (isQueueMode() && !isGameOnline()) return false;
+  return true;
+}
+window.BLTHouseAssertGameOnlineForAction = function(action){
+  if (!isQueueMode() && !hasWorkerBackend()) return null;
+  if (!actionNeedsGame(action)) return null;
+  if (!isGameOnline()) {
+    const err = new Error('game_offline');
+    err.code = 'game_offline';
+    return err;
+  }
+  return null;
+};
 function refreshGameStatusUi(forceLabel){
   const online = isGameOnline();
   if (forceLabel) {
@@ -712,6 +755,7 @@ function humanQueueError(e){
   if (code === 'not_owner')
     return 'Игровые действия только у владельца дома. Атмосфера доступна после входа.';
   if (code === 'rate limit') return 'Слишком часто — подожди секунду.';
+  if (code === 'game_offline') return 'Игра оффлайн — команды в очередь не ставятся';
   return String((e && e.message) || e || 'сбой');
 }
 
@@ -931,25 +975,13 @@ async function postAction(action, extra={}){
         refreshGameStatusUi();
         return {ok:false, msg:'not_owner'};
       }
-      if (!isGameOnline()) {
+      if (actionNeedsGame(action) && !(await verifyGameOnlineFresh())) {
         toast('Игра оффлайн — команды в очередь не ставятся');
         setFooter('Игра оффлайн');
         refreshGameStatusUi();
         return {ok:false, msg:'game_offline'};
       }
-      let prevTs = null;
-      try {
-        const packed = await window.BLTHouseExtFetchState(houseId, parseRoute().viewer);
-        if (packed) {
-          prevTs = packed.ts;
-          noteGameTs(packed.ts);
-        }
-      } catch (e) {}
-      if (!isGameOnline()) {
-        toast('Игра оффлайн — команды в очередь не ставятся');
-        refreshGameStatusUi();
-        return {ok:false, msg:'game_offline'};
-      }
+      const prevTs = lastGameTs || null;
       const pub = await window.BLTHouseExtPublishAction(action, extra);
       const actionId = (pub && (pub.actionId || (pub.data && pub.data.queued))) || (extra && (extra.id || extra.actionId)) || '';
       toast('В очередь игры');
@@ -976,6 +1008,8 @@ async function postAction(action, extra={}){
         refreshGameStatusUi();
       } else if (e && e.code === 'login_required') {
         refreshGameStatusUi();
+      } else if (e && e.code === 'game_offline') {
+        refreshGameStatusUi();
       } else {
         setSync(false, 'Сбой очереди');
       }
@@ -984,6 +1018,12 @@ async function postAction(action, extra={}){
   }
 
   if (typeof window.BLTHouseExtPublishAction === 'function' && ((window.BLT_HOUSE_EXT||{}).ebsUrl || (window.BLT_HOUSE_EXT||{}).queueUrl)) {
+    if (actionNeedsGame(action) && !(await verifyGameOnlineFresh())) {
+      toast('Игра оффлайн — команды в очередь не ставятся');
+      setFooter('Игра оффлайн');
+      refreshGameStatusUi();
+      return {ok:false, msg:'game_offline'};
+    }
     try {
       const pub = await window.BLTHouseExtPublishAction(action, extra);
       toast('В очередь');
@@ -2420,8 +2460,7 @@ function renderSide(){
     const uniqNeed=Number(house.craftingUniqueSkillRequired)||0;
     const cultureNeed=Number(house.craftingOtherCultureSkillRequired)||0;
     const craftOn=house.craftingEnabled!==false;
-    const owner = isPanelOwner();
-    const canCraft = !!(owner && selectedForgeType && craftOn);
+    const canCraft = !!(canRunGameActions() && selectedForgeType && craftOn);
     const uniqSel = forgeUniqueMode ? ' selected' : '';
     html=`<div class="kicker">Кузница (!BlacksmithingNew)</div>
       <div class="grid">
@@ -2498,7 +2537,7 @@ function yardList(){
   return a.join('')||'<div class="list-item">Пока пусто</div>';
 }
 function storageList(){
-  const owner = isPanelOwner();
+  const owner = canRunGameActions();
   return (house.storageItems||[]).slice(0,40).map(it=>{
     const name=it.FinalName||it.finalName||it.Name||it.name||it.ItemStringId||it.itemStringId;
     const idx=it.Index||it.index||'';
@@ -2521,7 +2560,7 @@ function storageList(){
   }).join('')||'<div class="list-item">Пусто — куйте в мастерской или положите из инвентаря BLT</div>';
 }
 function storageGoodsList(){
-  const owner = isPanelOwner();
+  const owner = canRunGameActions();
   return (house.storageGoods||[]).slice(0,40).map(it=>{
     const name=it.FinalName||it.finalName||it.Name||it.name||it.ItemStringId||it.itemStringId;
     const idx=it.Index||it.index||'';
@@ -2538,7 +2577,7 @@ let shopShown = { goods: 80, clothes: 80 };
 const SHOP_PAGE = 80;
 
 function shopList(kind){
-  const owner = isPanelOwner();
+  const owner = canRunGameActions();
   const all = house.shopItems||[];
   const wantClothes = String(kind||'').toLowerCase() === 'clothes';
   const key = wantClothes ? 'clothes' : 'goods';
@@ -2573,7 +2612,7 @@ function shopList(kind){
   return html;
 }
 function heroInventoryList(){
-  const owner = isPanelOwner();
+  const owner = canRunGameActions();
   return (house.heroInventory||[]).slice(0,40).map(it=>{
     const name=it.Name||it.name||'';
     const idx=it.Index||it.index;
@@ -2609,9 +2648,11 @@ function actionsHtml(room){
     return false;
   });
   if(!acts.length) return '<div class="notice">Нет доступных действий</div>';
-  const owner = isPanelOwner();
-  return acts.map(a=>{
-    const dis=!a.available || !owner;
+  const offlineNotice = (isQueueMode() && isPanelOwner() && !isGameOnline())
+    ? '<div class="notice warn">Игра оффлайн — улучшения, крафт и магазин недоступны, пока Bannerlord не запущен с модом.</div>'
+    : '';
+  return offlineNotice + acts.map(a=>{
+    const dis=!a.available || !canRunGameActions();
     const cost=a.cost?`<span class="cost">${Number(a.cost).toLocaleString('ru-RU')}</span>`:'';
     const hint=a.hint?`<span class="hint">${esc(a.hint)}</span>`:'';
     const cmd=a.command?`<span class="hint">${esc(a.command)}</span>`:'';
@@ -2696,9 +2737,9 @@ function showItemInspect(src, idx){
   add('Название', name);
   add('Тип', it.ItemType || it.itemType || it.Category || it.category);
   add('Тир', (it.Tier ?? it.tier) != null ? String(it.Tier ?? it.tier) : '');
-  add('Модификатор', it.ItemModifierId || it.itemModifierId);
+  add('Модификатор', it.ItemModifierDescription || it.itemModifierDescription);
   add('Уникальный', (it.IsUnique || it.isUnique) ? 'да' : '');
-  add('ID', it.ItemStringId || it.itemStringId);
+  add('ID предмета', it.ItemStringId || it.itemStringId);
   add('Цена продажи', it.EstimatedSellPrice || it.estimatedSellPrice || it.UnitPrice || it.unitPrice);
   add('На рынке', it.Available ?? it.available);
   add('Количество', it.Count || it.count);
@@ -2734,6 +2775,7 @@ function switchTab(id){
 
 function onAction(a){
   if(!isPanelOwner()){ toast('Войди Twitch как владелец'); return; }
+  if(isQueueMode() && !isGameOnline()){ toast('Игра оффлайн — команды в очередь не ставятся'); refreshGameStatusUi(); return; }
   if(!a.available){ toast(a.disabledReason||'Недоступно'); return; }
   if(a.id==='inventory'){
     switchTab('storage');
@@ -2774,6 +2816,7 @@ function toggleForgeUnique(){
 async function craftSelectedForgeType(){
   if(!selectedForgeType){ toast('Сначала выбери тип в списке'); return; }
   if(!isPanelOwner()){ toast('Войди Twitch как владелец'); return; }
+  if(isQueueMode() && !isGameOnline()){ toast('Игра оффлайн — команды в очередь не ставятся'); refreshGameStatusUi(); return; }
   if(house.craftingEnabled===false){ toast('Crafting отключён в Settings BlacksmithingNew'); return; }
   const action = forgeUniqueMode ? 'forge_unique' : 'forge_craft';
   await postAction(action, { target: selectedForgeType, value: selectedForgeType });
@@ -2789,6 +2832,7 @@ function openConfirm(a){
   document.getElementById('modal').classList.add('show');
   document.getElementById('modalConfirm').onclick=async()=>{
     closeModal();
+    if(isQueueMode() && !isGameOnline()){ toast('Игра оффлайн — команды в очередь не ставятся'); refreshGameStatusUi(); return; }
     await postAction(a.id);
     if(a.command) copyCmd(a.command);
   };
@@ -2806,6 +2850,7 @@ function openPrompt(a){
     const val=(document.getElementById('modalInput')||{}).value||'';
     closeModal();
     if(!val.trim()){ toast('Пустое значение'); return; }
+    if(isQueueMode() && !isGameOnline()){ toast('Игра оффлайн — команды в очередь не ставятся'); refreshGameStatusUi(); return; }
     const extra=a.id==='invite'?{target:val.trim()}:{value:val.trim()};
     await postAction(a.id, extra);
     if(a.command) copyCmd(a.command.replace('<player>',val.trim()).replace('<name>',val.trim()));
@@ -2985,6 +3030,8 @@ async function startAtmosphere(){
     : (twitchLoggedIn() ? 'Гость · кликай объекты' : 'Просмотр · войди Twitch'));
 
   const {houseId} = route;
+  await promiseTimeout(startAtmosphere(), 10000, null);
+
   if (useSupabaseQueue() && houseId && window.BLTHouseSupabaseQueue.subscribeState) {
     promiseTimeout(
       window.BLTHouseSupabaseQueue.subscribeState(houseId, {
@@ -3007,8 +3054,6 @@ async function startAtmosphere(){
   } else {
     pollTimer = setInterval(() => refresh(false), 3000);
   }
-
-  startAtmosphere().catch(() => {});
 })();
 </script>
 </body>

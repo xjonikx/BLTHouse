@@ -1,4 +1,4 @@
-/* BLT House: Supabase actions + state (shared client for queue + presence). */
+/* BLT House: Supabase actions + state (postgres_changes). Atmosphere uses presence-realtime.js (separate client). */
 (function () {
   const cfg = () => window.BLT_HOUSE_EXT || {};
   const FETCH_TIMEOUT_MS = 8000;
@@ -20,12 +20,12 @@
     if (client) return client;
     const c = cfg();
     client = window.supabase.createClient(c.supabaseUrl, c.supabaseAnonKey, {
-      realtime: { params: { eventsPerSecond: 12 } },
+      realtime: { params: { eventsPerSecond: 20 } },
     });
     return client;
   }
 
-  /** Single Supabase client for presence-realtime.js (avoid 2× WebSocket crash). */
+  /** Optional — presence-realtime.js uses its own client so game state never throttles atmosphere. */
   window.BLTHouseSupabaseGetClient = getClient;
 
   function channelKey() {
@@ -226,6 +226,10 @@
     getClient: getClient,
 
     async enqueueAction(messageObj) {
+      if (typeof window.BLTHouseAssertGameOnlineForAction === "function") {
+        const block = window.BLTHouseAssertGameOnlineForAction(messageObj.action);
+        if (block) throw block;
+      }
       const sb = getClient();
       if (!sb) throw new Error("supabase_not_configured");
       const twitch = window.BLTHouseTwitch || {};

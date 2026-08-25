@@ -12,13 +12,16 @@
   let houseId = "";
   let onUpdate = null;
 
+  let client = null;
+
   function getClient() {
-    if (window.BLTHouseSupabaseGetClient) return window.BLTHouseSupabaseGetClient();
+    if (client) return client;
     if (!enabled()) return null;
     const c = cfg();
-    return window.supabase.createClient(c.supabaseUrl, c.supabaseAnonKey, {
-      realtime: { params: { eventsPerSecond: 12 } },
+    client = window.supabase.createClient(c.supabaseUrl, c.supabaseAnonKey, {
+      realtime: { params: { eventsPerSecond: 40 } },
     });
+    return client;
   }
 
   function subscribeWithTimeout(ch, ms) {
