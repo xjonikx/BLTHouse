@@ -89,22 +89,26 @@
     throw new Error(errors.join(" | ") || "No queueUrl/ebsUrl in config.js");
   };
 
-  window.BLTHouseExtFetchState = async function (houseId) {
+  window.BLTHouseExtFetchState = async function (houseId, viewer) {
     const base = queueBase();
     if (!base || !houseId) return null;
-    const res = await fetch(base + "/state?house=" + encodeURIComponent(houseId), { cache: "no-store" });
+    const twitch = window.BLTHouseTwitch || {};
+    const who = (twitch.user && twitch.user.login) || viewer || "";
+    const qs = new URLSearchParams({ house: houseId });
+    if (who) qs.set("viewer", who);
+    const res = await fetch(base + "/state?" + qs.toString(), { cache: "no-store" });
     if (!res.ok) return null;
     const data = await res.json().catch(() => null);
     if (!data || !data.house) return null;
     return { house: data.house, ts: data.ts || 0 };
   };
 
-  window.BLTHouseExtWaitState = async function (houseId, prevTs, timeoutMs) {
+  window.BLTHouseExtWaitState = async function (houseId, prevTs, timeoutMs, viewer) {
     const t0 = Date.now();
     const limit = timeoutMs || 8000;
     let last = null;
     while (Date.now() - t0 < limit) {
-      last = await window.BLTHouseExtFetchState(houseId);
+      last = await window.BLTHouseExtFetchState(houseId, viewer);
       if (last && last.house && (prevTs == null || last.ts !== prevTs)) return last.house;
       await new Promise((r) => setTimeout(r, 200));
     }

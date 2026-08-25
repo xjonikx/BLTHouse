@@ -692,7 +692,7 @@ async function fetchHouse(){
     const cacheKey = 'blt_house_last_' + houseId;
     if (typeof window.BLTHouseExtFetchState === 'function') {
       try {
-        const packed = await window.BLTHouseExtFetchState(houseId);
+        const packed = await window.BLTHouseExtFetchState(houseId, viewer);
         const remote = packed && packed.house ? packed.house : null;
         if (remote) {
           try { sessionStorage.setItem(cacheKey, JSON.stringify(remote)); } catch(e) {}
@@ -734,6 +734,10 @@ function applyPanelHouse(raw){
   const next = normalize(raw);
   if (isQueueMode()) {
     next.isOwnerViewer = !!(window.BLTHouseTwitch && window.BLTHouseTwitch.isOwner(next));
+    if (!next.isOwnerViewer) {
+      next.gold = 0;
+      next.heroInventory = [];
+    }
     if (!next.actions || !next.actions.length) {
       const r = parseRoute();
       next.actions = queueStub(next.houseId, r.viewer).Actions.map(a=>({
@@ -756,7 +760,7 @@ async function postAction(action, extra={}){
       }
       let prevTs = null;
       try {
-        const packed = await window.BLTHouseExtFetchState(houseId);
+        const packed = await window.BLTHouseExtFetchState(houseId, parseRoute().viewer);
         if (packed) prevTs = packed.ts;
       } catch (e) {}
       const pub = await window.BLTHouseExtPublishAction(action, extra);
@@ -764,7 +768,7 @@ async function postAction(action, extra={}){
       setFooter('Игра ← ' + action);
       setSync(true, 'В очереди');
       if (typeof window.BLTHouseExtWaitState === 'function') {
-        window.BLTHouseExtWaitState(houseId, prevTs, 6000).then(remote => {
+        window.BLTHouseExtWaitState(houseId, prevTs, 6000, parseRoute().viewer).then(remote => {
           if (!remote) { setSync(true, defaultSyncLabel()); toast('Игра не ответила — проверь, что мод запущен'); return; }
           house = applyPanelHouse(remote);
           try { sessionStorage.setItem('blt_house_last_' + houseId, JSON.stringify(remote)); } catch(e) {}
@@ -1430,16 +1434,13 @@ function findSelfPersonEl(scene){
   const t = window.BLTHouseTwitch || {};
   const login = String((t.user && t.user.login) || '').toLowerCase();
   const display = String((t.user && t.user.display) || '').toLowerCase();
-  const owner = String(house && (house.ownerName || house.ownerPlayerId) || '').toLowerCase();
   const people = scene.querySelectorAll('.room-person');
   for (const el of people) {
     const nm = String((el.querySelector('.name') && el.querySelector('.name').textContent) || '').toLowerCase();
     if (login && nm.includes(login)) return el;
     if (display && nm.includes(display)) return el;
-    if (owner && nm.includes(owner)) return el;
   }
-  if (people.length === 1) return people[0];
-  return people.length ? people[0] : null;
+  return null;
 }
 
 function moveSelfToObject(pose, objectName, kind){
