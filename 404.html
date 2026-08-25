@@ -5,12 +5,12 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <base href="/BLTHouse/">
 <title>BLT House</title>
-<script src="config.js?v=rt19"></script>
+<script src="config.js?v=rt20"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="supabase-queue.js?v=rt19"></script>
-<script src="twitch-auth.js?v=rt19"></script>
-<script src="extension-bridge.js?v=rt19"></script>
-<script src="presence-realtime.js?v=rt19"></script>
+<script src="supabase-queue.js?v=rt20"></script>
+<script src="twitch-auth.js?v=rt20"></script>
+<script src="extension-bridge.js?v=rt20"></script>
+<script src="presence-realtime.js?v=rt20"></script>
 <style>
 :root{
   --bg:#0d0d0c;--panel:#171614;--panel2:#201e19;--panel3:#29251e;
@@ -2826,35 +2826,38 @@ function applyHouseIfNewer(raw, packedTs){
 async function refresh(force){
   const seq = ++refreshSeq;
   try{
-    const {houseId, viewer} = parseRoute();
-    let packedTs = 0;
-    let raw = null;
-    if (isQueueMode() && typeof window.BLTHouseExtFetchState === 'function' && houseId) {
-      try {
-        const packed = await window.BLTHouseExtFetchState(houseId, viewer);
-        if (packed && packed.house) {
-          raw = packed.house;
-          packedTs = Number(packed.ts || 0) || 0;
-          noteGameTs(packedTs);
-          try { sessionStorage.setItem('blt_house_last_' + houseId, slimHouseJson(raw)); } catch(e) {}
-        }
-      } catch (e) {}
+    const {houseId} = parseRoute();
+    if (!houseId) {
+      await fetchHouse();
+      return;
     }
-    if (!raw) raw = await fetchHouse();
+
+    /*
+     * Queue/Supabase mode: fetchHouse() already performs the single
+     * state request, cache fallback and queue stub fallback.
+     * Do NOT request the same state here and then call fetchHouse()
+     * again — that caused duplicate slow requests during boot.
+     */
+    const raw = await fetchHouse();
     if (!raw) return;
-    if (seq !== refreshSeq) return; // newer refresh already in flight / finished
-    if (!force && house && Number(raw.Revision || raw.revision || 0) === lastRevision && lastRevision >= 0) {
+    if (seq !== refreshSeq) return;
+
+    if (!force && house &&
+        Number(raw.Revision || raw.revision || 0) === lastRevision &&
+        lastRevision >= 0) {
       refreshGameStatusUi();
       return;
     }
-    if (!applyHouseIfNewer(raw, packedTs)) {
+
+    if (!applyHouseIfNewer(raw, 0)) {
       refreshGameStatusUi();
       return;
     }
+
     refreshGameStatusUi();
     scheduleRenderAll();
     renderPresenceOnly();
-  }catch(e){
+  } catch(e) {
     refreshGameStatusUi();
     setFooter('Нет свежего /state — показан последний снимок');
   }
@@ -2929,42 +2932,108 @@ async function startAtmosphere(){
     const pop=document.getElementById('interactPop');
     if(pop && !pop.contains(e.target) && !e.target.closest('.object,.furniture,.room-person')) closeInteract();
   });
+
   setupSceneTools();
-  if(window.BLTHouseTwitch) await window.BLTHouseTwitch.init();
+
+  /*
+   * Twitch init is the only startup dependency. Everything that talks
+   * to Supabase/Worker is deliberately started in the background below.
+   * A network service must never be allowed to freeze the page boot.
+   */
+  try {
+    if(window.BLTHouseTwitch) {
+      await Promise.race([
+        window.BLTHouseTwitch.init(),
+        new Promise((resolve) => setTimeout(resolve, 5000))
+      ]);
+    }
+  } catch (e) {
+    console.warn('Twitch init', e);
+  }
+
   updateAuthUi();
   purgeFatHouseCache();
-  await refresh(true);
-  if (!gameStatusTimer) gameStatusTimer = setInterval(() => refreshGameStatusUi(), 5000);
-  if (!isQueueMode()) {
-    pollTimer=setInterval(()=>refresh(false), 2000);
-  } else {
+
+  /*
+   * Show the application immediately in queue mode. refresh(true)
+   * fills it with the real state when/if Supabase answers.
+   */
+  if (isQueueMode()) {
+    showApp();
     refreshGameStatusUi();
     setFooter(isOwnerNow()
       ? 'Владелец · очередь в игру'
       : (twitchLoggedIn()
         ? 'Гость · кликай объекты'
         : 'Просмотр · войди Twitch'));
-    const {houseId} = parseRoute();
-    if (useSupabaseQueue() && houseId && window.BLTHouseSupabaseQueue.subscribeState) {
-      await window.BLTHouseSupabaseQueue.subscribeState(houseId, {
-        onState: (packed) => {
-          if (!packed || !packed.house) return;
-          noteGameTs(packed.ts);
-          if (!applyHouseIfNewer(packed.house, packed.ts)) {
-            refreshGameStatusUi();
-            return;
-          }
-          refreshGameStatusUi();
-          scheduleRenderAll();
-          renderPresenceOnly();
-        },
-      });
-      // State sync = subscribeState poll (6s). No Realtime — legacy fat rows froze the tab.
-    } else {
-      pollTimer=setInterval(()=>refresh(false), 3000);
-    }
-    await startAtmosphere();
   }
+
+  /* Never block boot on state fetch. */
+  refresh(true).catch((e) => {
+    console.warn('initial refresh', e);
+  });
+
+  if (!gameStatusTimer) {
+    gameStatusTimer = setInterval(() => refreshGameStatusUi(), 5000);
+  }
+
+  if (!isQueueMode()) {
+    pollTimer = setInterval(() => refresh(false), 2000);
+    return;
+  }
+
+  const {houseId} = parseRoute();
+
+  /*
+   * Realtime state subscription runs independently of boot. Its own
+   * timeout/error handling lives in supabase-queue.js.
+   */
+  if (useSupabaseQueue() &&
+      houseId &&
+      window.BLTHouseSupabaseQueue.subscribeState) {
+    window.BLTHouseSupabaseQueue.subscribeState(houseId, {
+      onState: (packed) => {
+        if (!packed || !packed.house) return;
+        noteGameTs(packed.ts);
+
+        if (!applyHouseIfNewer(packed.house, packed.ts)) {
+          refreshGameStatusUi();
+          return;
+        }
+
+        refreshGameStatusUi();
+        scheduleRenderAll();
+        renderPresenceOnly();
+      },
+    }).then((ok) => {
+      if (ok) {
+        setFooter(isOwnerNow()
+          ? 'Владелец · очередь в игру'
+          : (twitchLoggedIn()
+            ? 'Гость · кликай объекты'
+            : 'Просмотр · войди Twitch'));
+        pollTimer = setInterval(() => refresh(false), 20000);
+      } else {
+        setFooter('Supabase state недоступен — работаем без Realtime');
+        pollTimer = setInterval(() => refresh(false), 5000);
+      }
+    }).catch((e) => {
+      console.warn('state subscribe', e);
+      setFooter('Supabase state недоступен — работаем без Realtime');
+      pollTimer = setInterval(() => refresh(false), 5000);
+    });
+  } else {
+    pollTimer = setInterval(() => refresh(false), 5000);
+  }
+
+  /*
+   * Atmosphere is also completely detached from boot. A broken WebSocket
+   * can therefore never prevent the HTML/UI from appearing.
+   */
+  startAtmosphere().catch((e) => {
+    console.warn('atmosphere', e);
+    setFooter('Атмосфера недоступна — просмотр продолжается');
+  });
 })();
 </script>
 </body>
