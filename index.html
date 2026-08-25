@@ -5,10 +5,11 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <base href="/BLTHouse/">
 <title>BLT House</title>
-<script src="config.js?v=nw3"></script>
+<script src="config.js?v=rt7"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="twitch-auth.js?v=nw3"></script>
-<script type="module" src="app/boot.js?v=nw3"></script>
+<script src="twitch-auth.js?v=rt7"></script>
+<script src="extension-bridge.js?v=rt7"></script>
+<script src="presence-realtime.js?v=rt7"></script>
 <style>
 :root{
   --bg:#0d0d0c;--panel:#171614;--panel2:#201e19;--panel3:#29251e;
@@ -491,7 +492,7 @@ header{
   </aside>
 </div>
 <footer class="footer">
-  <span>BLTHouse <span id="syncDiag" style="margin-left:8px;color:#6a6458"></span></span>
+  <span>BLTHouse</span>
   <span id="footerState">Просмотр · войди Twitch чтобы управлять своим домом</span>
 </footer>
 </div>
@@ -552,15 +553,10 @@ let remoteLayout = { ts: 0, rev: 0, rooms: {} };
 let layoutSince = 0;
 let applyingRemoteLayout = false;
 let layoutPublishTimer = null;
-function layoutCacheKey(){
-  try {
-    const { houseId } = parseRoute();
-    return 'blt_ui_cache_layout_' + (houseId || 'default');
-  } catch (e) {
-    return 'blt_ui_cache_layout_default';
-  }
-}
-try { visualPositions = JSON.parse(localStorage.getItem(layoutCacheKey()) || '{}') || {}; } catch (e) { visualPositions = {}; }
+let layoutReadyFromServer = false;
+let lastStateTs = 0;
+let refreshSeq = 0;
+try { visualPositions = JSON.parse(localStorage.getItem('blt_house_visual_positions') || '{}') || {}; } catch (e) { visualPositions = {}; }
 let lastInteractPos = null;
 
 function parseRoute(){
@@ -775,13 +771,14 @@ async function postAction(action, extra={}){
         if (packed) prevTs = packed.ts;
       } catch (e) {}
       const pub = await window.BLTHouseExtPublishAction(action, extra);
+      const actionId = (pub && (pub.actionId || (pub.data && pub.data.queued))) || (extra && (extra.id || extra.actionId)) || '';
       toast('В очередь игры');
       setFooter('Игра ← ' + action);
       setSync(true, 'В очереди');
       if (typeof window.BLTHouseExtWaitState === 'function') {
-        window.BLTHouseExtWaitState(houseId, prevTs, 6000, parseRoute().viewer).then(remote => {
+        window.BLTHouseExtWaitState(houseId, { prevTs, actionId, timeoutMs: 8000, viewer: parseRoute().viewer }).then(remote => {
           if (!remote) { setSync(true, defaultSyncLabel()); toast('Игра не ответила — проверь, что мод запущен'); return; }
-          house = applyPanelHouse(remote);
+          applyHouseIfNewer(remote, null);
           try { sessionStorage.setItem('blt_house_last_' + houseId, JSON.stringify(remote)); } catch(e) {}
           renderAll();
           const msg = remote.statusText || remote.StatusText || '';
@@ -790,7 +787,7 @@ async function postAction(action, extra={}){
           setFooter(msg || 'Состояние из игры');
         }).catch(()=> setSync(true, defaultSyncLabel()));
       }
-      return {ok:true, msg:'queue', via: pub.via, house:null};
+      return {ok:true, msg:'queue', via: pub.via, house:null, actionId};
     } catch (e) {
       const msg = humanQueueError(e);
       toast(msg);
@@ -952,23 +949,18 @@ function renderHeader(){
 }
 
 function saveVisualPositions(){
-  try { localStorage.setItem(layoutCacheKey(), JSON.stringify(visualPositions)); } catch (e) {}
-}
-function updateSyncDiagnostics(){
-  const el = document.getElementById('syncDiag');
-  if (!el) return;
-  const g = window.BLTHouseGame?.store?.guard || {};
-  const a = window.BLTHouseAtmosphere?.store?.guard || {};
-  const d = window.BLTHouseAtmosphere?.sync?.diagnostics || {};
-  el.textContent = 'Game ' + (g.gameRevision || 0) + ' · Atmo ' + (a.atmosphereRevision || 0) + ' · Pres ' + (a.presenceRevision || 0) + ' · Furn ' + (a.furnitureRevision || 0) + ' · ' + (d.realtime || '?') + '/' + (d.worker || '?');
+  try { localStorage.setItem('blt_house_visual_positions', JSON.stringify(visualPositions)); } catch (e) {}
 }
 async function publishPresenceDual(payload){
-  if (typeof window.__bltPublishPresence === 'function') {
-    try { return await window.__bltPublishPresence(payload); } catch (e) { console.warn('presence', e); }
-  }
+  const eventId = payload && payload.eventId ? payload.eventId : ((payload && payload.idle) ? null : newEventId());
+  const body = Object.assign({}, payload || {});
+  if (eventId) body.eventId = eventId;
   let workerData = null;
   if (typeof window.BLTHouseExtPublishPresence === 'function') {
-    try { workerData = await window.BLTHouseExtPublishPresence(payload); } catch (e) {}
+    try { workerData = await window.BLTHouseExtPublishPresence(body); } catch (e) {}
+  }
+  if (useSupabaseAtmosphere() && window.BLTHouseRealtime) {
+    try { await window.BLTHouseRealtime.publishFlavor(body); } catch (e) {}
   }
   return workerData;
 }
@@ -1019,6 +1011,7 @@ function findLayoutEl(scene, key){
     scene.querySelectorAll('.object, .furniture').forEach((o) => {
       if (found) return;
       if (String(o.dataset.objectId || '') === id) { found = o; return; }
+      if (String(o.dataset.layoutKey || '') === key) { found = o; return; }
       const lab = o.querySelector('.room-object-label');
       const div = o.querySelector('div');
       const txt = String((lab && lab.textContent) || (div && div.textContent) || '');
@@ -1050,11 +1043,13 @@ function applyLayoutToScene(roomId){
 }
 function scheduleLayoutPublish(){
   if (!canEditSceneLayout()) return;
+  if (!layoutReadyFromServer) return;
   if (layoutPublishTimer) clearTimeout(layoutPublishTimer);
   layoutPublishTimer = setTimeout(() => publishLayoutRoom(false), 350);
 }
 async function publishLayoutRoom(reset){
   if (!canEditSceneLayout() || !isQueueMode()) return;
+  if (!layoutReadyFromServer && !reset) return;
   const { houseId } = parseRoute();
   if (!houseId) return;
   const roomPositions = {};
@@ -1064,27 +1059,37 @@ async function publishLayoutRoom(reset){
       if (p && typeof p.x === 'number' && typeof p.y === 'number') roomPositions[key] = { x: p.x, y: p.y };
     });
   }
+  const baseRev = Number(remoteLayout.rev || layoutSince || 0) || 0;
   const ts = Date.now();
-  const rooms = Object.assign({}, remoteLayout.rooms || {}, { [currentTab]: roomPositions });
+  const rooms = Object.assign({}, remoteLayout.rooms || {}, { [currentTab]: reset ? {} : Object.assign({}, (remoteLayout.rooms && remoteLayout.rooms[currentTab]) || {}, roomPositions) });
   const localSnap = {
     room: currentTab,
     positions: roomPositions,
     reset: !!reset,
     ts,
     rev: ts,
+    baseRev,
     rooms,
   };
-  remoteLayout = { ts, rev: ts, rooms };
-  layoutSince = Math.max(layoutSince, ts);
 
+  // Worker + Supabase independently — one failure must not block the other.
   if (typeof window.BLTHouseExtPublishLayout === 'function') {
     try {
-      const payload = reset ? { room: currentTab, reset: true } : { room: currentTab, positions: roomPositions };
+      const payload = reset
+        ? { room: currentTab, reset: true, baseRev }
+        : { room: currentTab, positions: roomPositions, baseRev };
       const data = await window.BLTHouseExtPublishLayout(payload);
       if (data && data.rooms) {
         remoteLayout = { ts: data.ts || Date.now(), rev: data.rev || data.ts || 0, rooms: data.rooms };
         layoutSince = Math.max(layoutSince, remoteLayout.rev);
+        mergeLayoutRooms(data.rooms);
+        layoutReadyFromServer = true;
       }
+    } catch (e) {}
+  }
+  if (useSupabaseAtmosphere() && window.BLTHouseRealtime) {
+    try {
+      await window.BLTHouseRealtime.publishLayout(localSnap);
     } catch (e) {}
   }
 }
@@ -1101,44 +1106,39 @@ async function layoutPollLoop(){
       const data = await window.BLTHouseExtFetchLayout(houseId, { since: layoutSince, wait });
       if (data && data.ok !== false && data.rooms) {
         ingestRemoteLayout(data);
+        layoutReadyFromServer = true;
+      } else if (!seeded) {
+        layoutReadyFromServer = true; // empty server layout — allow owner publishes
       }
       seeded = true;
       if (!wait) await new Promise((r) => setTimeout(r, 400));
     } catch (e) {
       seeded = true;
+      layoutReadyFromServer = true;
       await new Promise((r) => setTimeout(r, 1000));
     }
   }
 }
 function ingestRemoteLayout(payload){
   if (!payload) return;
-  if (payload.furniture && typeof payload.furniture === 'object') {
-    if (window.BLTHouseAtmosphere?.store) {
-      Object.assign(window.BLTHouseAtmosphere.store.furniture, payload.furniture);
-      const fr = Number(payload.furnitureRevision || payload.rev || 0);
-      if (fr > (window.BLTHouseAtmosphere.store.guard.furnitureRevision || 0)) {
-        window.BLTHouseAtmosphere.store.guard.furnitureRevision = fr;
-      }
-    }
-    Object.keys(payload.furniture).forEach((id) => {
-      const f = payload.furniture[id];
-      if (f && typeof f.x === 'number') visualPositions['object:' + id] = { x: f.x, y: f.y };
-    });
-    saveVisualPositions();
-    applyLayoutToScene(payload.room || currentTab);
-    return;
-  }
   const rev = Number(payload.rev || payload.ts || Date.now()) || 0;
-  if (layoutSince && rev > 0 && rev < layoutSince) return;
   remoteLayout.rooms = remoteLayout.rooms || {};
-  if (payload.rooms) Object.assign(remoteLayout.rooms, payload.rooms);
+  // Always merge room keys (even if rev is not newer) so concurrent object moves are not dropped.
+  if (payload.rooms) {
+    Object.keys(payload.rooms).forEach((room) => {
+      remoteLayout.rooms[room] = Object.assign({}, remoteLayout.rooms[room] || {}, payload.rooms[room] || {});
+    });
+  }
   if (payload.room && payload.positions) {
     remoteLayout.rooms[payload.room] = Object.assign({}, remoteLayout.rooms[payload.room] || {}, payload.positions);
   }
   if (payload.reset && payload.room) remoteLayout.rooms[payload.room] = {};
-  remoteLayout.ts = rev || Date.now();
-  remoteLayout.rev = rev || remoteLayout.ts;
-  if (rev > layoutSince) layoutSince = rev;
+  if (!layoutSince || rev >= layoutSince) {
+    remoteLayout.ts = rev || Date.now();
+    remoteLayout.rev = rev || remoteLayout.ts;
+    layoutSince = Math.max(layoutSince, rev);
+  }
+  layoutReadyFromServer = true;
   mergeLayoutRooms(remoteLayout.rooms);
   saveVisualPositions();
   applyLayoutToScene(payload.room || currentTab);
@@ -1201,13 +1201,17 @@ async function walkToPoint(x, y){
     window.__bltFlavorBusy = false;
   }
 }
-function positionKey(kind, id, fallbackX, fallbackY){
+function positionKey(kind, id, fallbackX, fallbackY, legacyId){
   const k = kind + ':' + String(id || '');
-  if (kind === 'object' && window.BLTHouseAtmosphere?.store?.furniture?.[String(id)]) {
-    const f = window.BLTHouseAtmosphere.store.furniture[String(id)];
-    if (typeof f.x === 'number' && typeof f.y === 'number') return { x: f.x, y: f.y, key: k };
+  let saved = visualPositions[k];
+  if ((!saved || typeof saved.x !== 'number') && legacyId && String(legacyId) !== String(id)) {
+    const legacyKey = kind + ':' + String(legacyId);
+    const legacy = visualPositions[legacyKey];
+    if (legacy && typeof legacy.x === 'number' && typeof legacy.y === 'number') {
+      saved = legacy;
+      visualPositions[k] = { x: legacy.x, y: legacy.y };
+    }
   }
-  const saved = visualPositions[k];
   if (saved && typeof saved.x === 'number' && typeof saved.y === 'number') return { x: saved.x, y: saved.y, key: k };
   return { x: fallbackX, y: fallbackY, key: k };
 }
@@ -1342,47 +1346,38 @@ function renderScene(){
 }
 
 function buildSceneContent(scene, tab){
-  const catalog = window.BLTHouseAtmosphere?.objects?.buildFurnitureCatalog?.(house, tab);
-  if (catalog && Object.keys(catalog).length) {
-    Object.values(catalog).forEach((o) => {
-      makeObject(scene, o.displayName, o.state || '', o.x, o.y, iconForObject(o.displayName), o.id, o.type);
-    });
-    const people = tab==='family' ? house.residents : [...(house.residents||[]),...(house.guests||[])];
-    placePeople(scene, people);
-    return;
-  }
   if(tab==='common'||tab==='family'){
     const furn=(house.furniture||[]).filter(f=> (f.room||'')===tab || (tab==='common' && (f.room==='common'||f.Room==='Common')));
     const fallback = tab==='common'
-      ? [{id:'fireplace_01',name:'Камин',state:'активен',x:15,y:28},{id:'table_01',name:'Стол',state:'свободен',x:39,y:49},{id:'chest_01',name:'Сундук',state:house.storageUsed+'/'+house.storageCapacity,x:11,y:61}]
-      : [{id:'table_family_01',name:'Семейный стол',state:house.familyCapacity||house.residentsCapacity,x:35,y:48},{id:'bed_01',name:'Кровати',state:house.residentsCount+'/'+house.residentsCapacity,x:70,y:48}];
-    (furn.length?furn:fallback).forEach((o,i)=>{
+      ? [{name:'Камин',state:'активен',x:15,y:28},{name:'Стол',state:'свободен',x:39,y:49},{name:'Сундук',state:house.storageUsed+'/'+house.storageCapacity,x:11,y:61}]
+      : [{name:'Семейный стол',state:house.familyCapacity||house.residentsCapacity,x:35,y:48},{name:'Кровати',state:house.residentsCount+'/'+house.residentsCapacity,x:70,y:48}];
+    (furn.length?furn:fallback).forEach(o=>{
       const nm=o.name||o.Name||'';
-      const id=o.id||o.Id||o.ObjectId||((window.BLTHouseAtmosphere?.objects?.inferType?.(nm)||'misc')+'_'+String(i+1).padStart(2,'0'));
-      makeObject(scene, nm, o.state||o.State||'', o.x??o.X??20, o.y??o.Y??40, iconForObject(nm), id);
+      const oid=o.objectId||o.ObjectId||'';
+      makeObject(scene, nm, o.state||o.State||'', o.x??o.X??20, o.y??o.Y??40, iconForObject(nm), oid);
     });
     const people = tab==='family' ? house.residents : [...(house.residents||[]),...(house.guests||[])];
     placePeople(scene, people);
   } else if(tab==='workshop'){
-    makeObject(scene, 'Кузница '+(house.workshopLevel?roman(house.workshopLevel):'—'), house.workshopLevel?'работает':'нет', 12, 28, iconUrl('forge'), 'forge_01', 'forge');
-    makeObject(scene, 'Стойка', 'инструменты', 70, 30, iconUrl('weapon'), 'weapon_rack_01', 'misc');
+    makeObject(scene, 'Кузница '+(house.workshopLevel?roman(house.workshopLevel):'—'), house.workshopLevel?'работает':'нет', 12, 28, iconUrl('forge'));
+    makeObject(scene, 'Стойка', 'инструменты', 70, 30, iconUrl('weapon'));
     placePeople(scene, (house.residents||[]).slice(0,1));
   } else if(tab==='yard'){
-    makeObject(scene, 'Конюшня '+(house.stableLevel?roman(house.stableLevel):'—'), (house.mountsCount||0)+' маунтов', 12, 35, iconUrl('stable'), 'stable_01', 'stable');
-    (house.pets||[]).forEach((p,i)=>makeObject(scene, p.Name||p.name||'Питомец', p.State||p.state||'', 45+i*8, 49+i*5, iconUrl('pet'), 'pet_'+String(i+1).padStart(2,'0')));
-    (house.mounts||[]).forEach((m,i)=>makeObject(scene, m.Name||m.name||'Маунт', m.Bond||m.bond||'', 60+i*5, 40+i*6, iconUrl('horse'), 'mount_'+String(i+1).padStart(2,'0')));
+    makeObject(scene, 'Конюшня '+(house.stableLevel?roman(house.stableLevel):'—'), (house.mountsCount||0)+' маунтов', 12, 35, iconUrl('stable'));
+    (house.pets||[]).forEach((p,i)=>makeObject(scene, p.Name||p.name||'Питомец', p.State||p.state||'', 45+i*8, 49+i*5, iconUrl('pet')));
+    (house.mounts||[]).forEach((m,i)=>makeObject(scene, m.Name||m.name||'Маунт', m.Bond||m.bond||'', 60+i*5, 40+i*6, iconUrl('horse')));
     if(!(house.pets||[]).length && !(house.mounts||[]).length)
-      makeObject(scene, 'Пустой двор', 'заведите животных', 50, 55, iconUrl('stable'), 'yard_empty_01');
+      makeObject(scene, 'Пустой двор', 'заведите животных', 50, 55, iconUrl('stable'));
   } else if(tab==='storage'){
-    makeObject(scene, 'Сундук', (house.storageUsed||0)+'/'+(house.storageCapacity||0), 18, 55, iconUrl('chest'), 'chest_storage_01', 'chest');
+    makeObject(scene, 'Сундук', (house.storageUsed||0)+'/'+(house.storageCapacity||0), 18, 55, iconUrl('chest'));
     if (!(house.storageItems||[]).length) {
-      makeObject(scene, 'Пустой склад', 'положи предметы из BLT', 50, 48, iconUrl('misc'), 'storage_empty_01');
+      makeObject(scene, 'Пустой склад', 'положи предметы из BLT', 50, 48, iconUrl('misc'));
     }
   } else if(tab==='history'){
     (house.history||[]).slice(0,6).forEach((h,i)=>{
       const text=h.Text||h.text||'';
       const x=12+(i%3)*30, y=i<3?30:58;
-      makeObject(scene, 'Запись', text.substring(0,28), x, y, iconUrl('history'), 'history_'+String(i+1).padStart(2,'0'));
+      makeObject(scene, 'Запись', text.substring(0,28), x, y, iconUrl('history'));
     });
   }
 }
@@ -1430,14 +1425,14 @@ function iconForObject(name){
   return iconUrl(iconKey(name));
 }
 
-function makeObject(scene, name, state, x, y, icon, stableId, typeOverride){
-  const id = stableId || name;
-  const pos = positionKey('object', id, x, y);
+function makeObject(scene, name, state, x, y, icon, objectId){
+  const id = objectId || name;
+  const pos = positionKey('object', id, x, y, name);
   const cls = furnitureClass(name);
   const d = document.createElement('div');
   d.dataset.objectId = String(id);
+  d.dataset.objectName = String(name || '');
   d.dataset.layoutKey = 'object:' + String(id);
-  if (typeOverride) d.dataset.objectType = typeOverride;
   if (cls) {
     d.className = 'furniture ' + cls;
     d.style.left = pos.x + '%';
@@ -1457,7 +1452,7 @@ function makeObject(scene, name, state, x, y, icon, stableId, typeOverride){
   d.onclick = (ev) => {
     if (sceneMode === 'move') return;
     ev.stopPropagation();
-    openInteract(ev, name, state, d, typeOverride || undefined);
+    openInteract(ev, name, state, d);
   };
   bindSceneDrag(d, scene, 'object', id, pos);
   scene.appendChild(d);
@@ -1581,33 +1576,14 @@ function setPresence(remote, opts){
   if(!remote || typeof remote !== 'object') return presence;
   if (!presenceJoinedAt) presenceJoinedAt = Date.now();
 
-  // Normalize v2 atmosphere snapshot → legacy shape
-  if (!remote.actors && remote.presence?.actors) remote = Object.assign({}, remote, { actors: remote.presence.actors });
-  if (remote.furniture && typeof window.ingestRemoteLayout === 'function') {
-    try {
-      ingestRemoteLayout({
-        furniture: remote.furniture,
-        furnitureRevision: remote.furnitureRevision,
-        rev: remote.furnitureRevision,
-        rooms: null,
-      });
-    } catch (e) {}
-  }
-  if (window.BLTHouseAtmosphere?.store && (remote.presenceRevision || remote.atmosphereRevision)) {
-    try {
-      window.BLTHouseAtmosphere.store.applySnapshot(remote, opts);
-    } catch (e) {}
-  }
-
   const actors = Object.assign({}, presence.actors || {});
   Object.keys(remote.actors || {}).forEach((k) => {
     const a = remote.actors[k];
     const cur = actors[k];
-    if (!cur || Number(a.ts || a.lastSeen || 0) >= Number(cur.ts || cur.lastSeen || 0)) {
+    if (!cur || Number(a.ts || 0) >= Number(cur.ts || 0)) {
       actors[k] = Object.assign({}, cur || {}, a, {
         x: a.x != null ? Number(a.x) : (cur && cur.x),
         y: a.y != null ? Number(a.y) : (cur && cur.y),
-        ts: Number(a.ts || a.lastSeen || Date.now()),
       });
     }
   });
@@ -1646,7 +1622,7 @@ function setPresence(remote, opts){
     }
   }
   while (liveLog.length > 12) liveLog.shift();
-  while (seenEventIds.size > 80) {
+  while (seenEventIds.size > 200) {
     const first = seenEventIds.values().next().value;
     seenEventIds.delete(first);
   }
@@ -1670,8 +1646,7 @@ function newEventId(){
 }
 
 function useSupabaseAtmosphere(){
-  const c = window.BLT_HOUSE_EXT || {};
-  return !!(c.supabaseUrl && c.supabaseAnonKey && window.supabase);
+  return !!(window.BLTHouseRealtime && window.BLTHouseRealtime.enabled && window.BLTHouseRealtime.enabled());
 }
 
 function ingestFlavorEvent(e){
@@ -1707,6 +1682,7 @@ function applyRealtimeActors(actors){
   ensureSelfPresence();
   const prev = presence.actors || {};
   const next = Object.assign({}, prev);
+  const now = Date.now();
   Object.keys(actors || {}).forEach((k) => {
     const remote = actors[k];
     const cur = prev[k];
@@ -1716,6 +1692,11 @@ function applyRealtimeActors(actors){
         y: remote.y != null ? Number(remote.y) : (cur && cur.y),
       });
     }
+  });
+  // Keep actors missing from incomplete realtime snapshots until TTL.
+  Object.keys(prev).forEach((k) => {
+    if (next[k]) return;
+    if (now - Number(prev[k].ts || 0) <= 60000) next[k] = prev[k];
   });
   const me = String((window.BLTHouseTwitch && window.BLTHouseTwitch.user && window.BLTHouseTwitch.user.login) || '').toLowerCase();
   if (me && prev[me] && next[me]) {
@@ -2312,17 +2293,45 @@ function renderAll(){
   updateSceneToolLocks();
 }
 
+function applyHouseIfNewer(raw, packedTs){
+  const next = isQueueMode() ? applyPanelHouse(raw) : normalize(raw);
+  const rev = Number(next.revision || 0) || 0;
+  const ts = Number(packedTs || 0) || 0;
+  if (house && !Number.isNaN(lastRevision) && rev > 0 && rev < lastRevision) return false;
+  if (ts > 0 && lastStateTs > 0 && ts < lastStateTs) return false;
+  if (rev > 0) lastRevision = Math.max(lastRevision, rev);
+  if (ts > 0) lastStateTs = Math.max(lastStateTs, ts);
+  house = next;
+  return true;
+}
+
 async function refresh(force){
+  const seq = ++refreshSeq;
   try{
-    const raw=await fetchHouse();
-    if(!raw) return;
-    const next=isQueueMode()?applyPanelHouse(raw):normalize(raw);
-    if(!force && next.revision===lastRevision && house){
+    const {houseId, viewer} = parseRoute();
+    let packedTs = 0;
+    let raw = null;
+    if (isQueueMode() && typeof window.BLTHouseExtFetchState === 'function' && houseId) {
+      try {
+        const packed = await window.BLTHouseExtFetchState(houseId, viewer);
+        if (packed && packed.house) {
+          raw = packed.house;
+          packedTs = Number(packed.ts || 0) || 0;
+          try { sessionStorage.setItem('blt_house_last_' + houseId, JSON.stringify(raw)); } catch(e) {}
+        }
+      } catch (e) {}
+    }
+    if (!raw) raw = await fetchHouse();
+    if (!raw) return;
+    if (seq !== refreshSeq) return; // newer refresh already in flight / finished
+    if (!force && house && Number(raw.Revision || raw.revision || 0) === lastRevision && lastRevision >= 0) {
       setSync(true, defaultSyncLabel());
       return;
     }
-    lastRevision=next.revision;
-    house=next;
+    if (!applyHouseIfNewer(raw, packedTs)) {
+      setSync(true, defaultSyncLabel());
+      return;
+    }
     setSync(true, defaultSyncLabel());
     renderAll();
     renderPresenceOnly();
@@ -2350,25 +2359,38 @@ function toggleTwitchAuth(){
   if(t.user){
     t.logout();
     updateAuthUi();
-    if (window.BLTHouseAtmosphere?.sync) window.BLTHouseAtmosphere.sync.stop();
+    if (window.BLTHouseRealtime) window.BLTHouseRealtime.disconnect();
     if(house){ house=applyPanelHouse(house); renderAll(); }
   } else t.login();
 }
 
 async function startAtmosphere(){
   presenceJoinedAt = Date.now();
+  seenEventIds = new Set();
+  liveLog = [];
   const {houseId} = parseRoute();
   if (!houseId) return;
 
-  // Prefer refactored AtmosphereSync (Worker authoritative, Supabase notify-only)
-  if (typeof window.__bltStartAtmosphere === 'function') {
-    await window.__bltStartAtmosphere(houseId);
-    await announcePresenceHere();
-    updateSyncDiagnostics();
-    return;
+  if (useSupabaseAtmosphere() && twitchLoggedIn()) {
+    const ok = await window.BLTHouseRealtime.connect(houseId, {
+      onUpdate: (msg) => {
+        if (msg.kind === 'actors') {
+          applyRealtimeActors(msg.actors);
+          renderPresenceOnly();
+        } else if (msg.kind === 'flavor') {
+          ingestFlavorEvent(msg.event);
+          renderPresenceOnly();
+        } else if (msg.kind === 'layout') {
+          ingestRemoteLayout(msg.layout);
+        }
+      },
+    });
+    setSync(true, ok ? 'Онлайн' : defaultSyncLabel());
+    if (!ok) setFooter('Realtime не подключился — Worker presence всё равно работает');
+  } else if (useSupabaseAtmosphere() && !twitchLoggedIn()) {
+    setFooter('Войди Twitch для атмосферы');
   }
 
-  // Fallback if module not loaded yet
   await announcePresenceHere();
   if (!window.__bltPresenceLoop) presenceLongPollLoop();
   if (!window.__bltLayoutLoop) layoutPollLoop();
@@ -2380,12 +2402,9 @@ async function startAtmosphere(){
     if(pop && !pop.contains(e.target) && !e.target.closest('.object,.furniture,.room-person')) closeInteract();
   });
   setupSceneTools();
-  // Wait briefly for ES module bridges (deferred) — never hang forever
-  for (let i = 0; i < 40 && !window.__bltSyncReady; i++) await new Promise(r => setTimeout(r, 25));
   if(window.BLTHouseTwitch) await window.BLTHouseTwitch.init();
   updateAuthUi();
   await refresh(true);
-  window.house = house;
   if (!isQueueMode()) {
     pollTimer=setInterval(()=>refresh(false), 2000);
   } else {
@@ -2395,9 +2414,8 @@ async function startAtmosphere(){
       : (twitchLoggedIn()
         ? 'Гость · кликай объекты'
         : 'Просмотр · войди Twitch'));
-    pollTimer=setInterval(()=>{ refresh(false); window.house = house; }, 3000);
+    pollTimer=setInterval(()=>refresh(false), 3000);
     await startAtmosphere();
-    updateSyncDiagnostics();
   }
 })();
 </script>
