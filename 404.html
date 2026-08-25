@@ -5,11 +5,11 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <base href="/BLTHouse/">
 <title>BLT House</title>
-<script src="config.js?v=rt10"></script>
+<script src="config.js?v=rt11"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="twitch-auth.js?v=rt10"></script>
-<script src="extension-bridge.js?v=rt10"></script>
-<script src="presence-realtime.js?v=rt10"></script>
+<script src="twitch-auth.js?v=rt11"></script>
+<script src="extension-bridge.js?v=rt11"></script>
+<script src="presence-realtime.js?v=rt11"></script>
 <style>
 :root{
   --bg:#0d0d0c;--panel:#171614;--panel2:#201e19;--panel3:#29251e;
@@ -2163,6 +2163,7 @@ function inspectPerson(p){
 }
 
 function renderSide(){
+  bindRightContentUi();
   const titles={common:'Общая',family:'Семья',workshop:'Мастерская',yard:'Двор',shop:'Магазин',storage:'Хранилище',history:'История'};
   const descs={
     common:'Главная комната дома. Жильцы, гости и общие объекты.',
@@ -2202,15 +2203,16 @@ function renderSide(){
     if (selectedForgeType && !types.includes(selectedForgeType)) selectedForgeType = null;
     const typeBtns=types.map(t=>{
       const sel = selectedForgeType===t ? ' selected' : '';
-      return `<button type="button" class="action${sel}" onclick="selectForgeType(${JSON.stringify(t)})">${esc(t)}</button>`;
+      return `<button type="button" class="action${sel}" data-ui="forge-type" data-type="${escAttr(t)}">${esc(t)}</button>`;
     }).join('');
-    const skill=house.craftingSkill||0;
-    const maxTier=house.craftingMaxTier||0;
-    const cost=house.craftingDefaultCost||0;
-    const uniqNeed=house.craftingUniqueSkillRequired||0;
-    const cultureNeed=house.craftingOtherCultureSkillRequired||0;
+    const skill=Number(house.craftingSkill)||0;
+    const maxTier=Number(house.craftingMaxTier)||0;
+    const cost=Number(house.craftingDefaultCost)||0;
+    const uniqNeed=Number(house.craftingUniqueSkillRequired)||0;
+    const cultureNeed=Number(house.craftingOtherCultureSkillRequired)||0;
     const craftOn=house.craftingEnabled!==false;
-    const canCraft = !!(house.isOwnerViewer && selectedForgeType && craftOn);
+    const owner = isPanelOwner();
+    const canCraft = !!(owner && selectedForgeType && craftOn);
     const uniqSel = forgeUniqueMode ? ' selected' : '';
     html=`<div class="kicker">Кузница (!BlacksmithingNew)</div>
       <div class="grid">
@@ -2219,12 +2221,12 @@ function renderSide(){
         <div class="stat"><span>СТОИМОСТЬ</span><b>${cost?Number(cost).toLocaleString('ru-RU'):'—'}</b></div>
         <div class="stat"><span>УРОВЕНЬ КУЗНИЦЫ</span><b>${roman(house.workshopLevel||0)}</b></div>
       </div>
-      <div class="notice" style="margin-top:8px">Навык и тир — из игры (Settings BlacksmithingNew). Уникальный: навык ≥ ${uniqNeed||'?'}, другая культура ≥ ${cultureNeed||'?'}. Типы только с сервера.</div>
+      <div class="notice" style="margin-top:8px">Типы = BlacksmithingNew (только существующие в каталоге игры). Уникальный ≥ ${uniqNeed||'?'} · другая культура ≥ ${cultureNeed||'?'}.</div>
       <div style="margin-top:12px" class="kicker">Тип предмета ${selectedForgeType?'· выбрано: '+esc(selectedForgeType):'· не выбран'}</div>
-      <div class="forge-types">${typeBtns||'<div class="notice">Нет типов — дождитесь синхронизации с игрой (ForgeItemTypes).</div>'}</div>
+      <div class="forge-types">${typeBtns||'<div class="notice">Нет типов от игры — дождитесь /state (ForgeItemTypes) или перезапустите мод.</div>'}</div>
       <div style="margin-top:12px" class="btns">
-        <button type="button" class="action${uniqSel}" onclick="toggleForgeUnique()">${forgeUniqueMode?'Уникальный: ВКЛ':'Уникальный: выкл'}</button>
-        <button type="button" class="action" ${canCraft?'':'disabled'} onclick="craftSelectedForgeType()">Скрафтить${selectedForgeType?' «'+esc(selectedForgeType)+'»':''}${forgeUniqueMode?' (уникальный)':''}</button>
+        <button type="button" class="action${uniqSel}" data-ui="forge-unique-toggle">${forgeUniqueMode?'Уникальный: ВКЛ':'Уникальный: выкл'}</button>
+        <button type="button" class="action" data-ui="forge-craft" ${canCraft?'':'disabled'}>Скрафтить${selectedForgeType?' «'+esc(selectedForgeType)+'»':''}${forgeUniqueMode?' (уникальный)':''}</button>
       </div>
       <div style="margin-top:12px" class="btns">${actionsHtml('workshop')}</div>`;
   } else if(currentTab==='yard'){
@@ -2275,6 +2277,7 @@ function yardList(){
   return a.join('')||'<div class="list-item">Пока пусто</div>';
 }
 function storageList(){
+  const owner = isPanelOwner();
   return (house.storageItems||[]).slice(0,40).map(it=>{
     const name=it.FinalName||it.finalName||it.Name||it.name||it.ItemStringId||it.itemStringId;
     const idx=it.Index||it.index||'';
@@ -2287,41 +2290,42 @@ function storageList(){
     if(src.startsWith('/assets/icons/')) src=src.slice(1);
     if(!src || (src.indexOf('assets/icons/')<0 && src.indexOf('assets/heroes/')<0 && src.indexOf('assets/items/')<0 && src.indexOf('house-icons/')<0))
       src=iconUrl(iconKey(type));
-    const owner=house.isOwnerViewer;
-    const btns=owner&&id?`<span class="row-acts">
-      <button type="button" class="btn-sell" onclick="postAction('sell_item',{target:${JSON.stringify(String(idx||id))}})">Продать${price?' · '+price:''}</button>
-      <button type="button" class="btn-sell" onclick="postAction('take_item',{target:${JSON.stringify(String(idx||id))}})">В инвентарь</button>
+    const target = String(idx || id);
+    const btns=owner&&target?`<span class="row-acts">
+      <button type="button" class="btn-sell" data-ui="act" data-action="sell_item" data-target="${escAttr(target)}">Продать${price?' · '+price:''}</button>
+      <button type="button" class="btn-sell" data-ui="act" data-action="take_item" data-target="${escAttr(target)}">В инвентарь</button>
     </span>`:'';
     return `<div class="list-item"><img class="ico" src="${esc(src)}" alt="" onerror="this.src='assets/icons/misc.svg'"><div class="txt"><b>${esc(name)}</b><small>${esc(type||'item')}${tier!=null?' · t'+tier:''}${it.IsUnique||it.isUnique?' · unique':''}</small></div>${btns}</div>`;
   }).join('')||'<div class="list-item">Пусто — куйте в мастерской или положите из инвентаря BLT</div>';
 }
 function storageGoodsList(){
+  const owner = isPanelOwner();
   return (house.storageGoods||[]).slice(0,40).map(it=>{
     const name=it.FinalName||it.finalName||it.Name||it.name||it.ItemStringId||it.itemStringId;
     const idx=it.Index||it.index||'';
     const count=it.Count||it.count||1;
     const price=it.EstimatedSellPrice||it.estimatedSellPrice||'';
-    const owner=house.isOwnerViewer;
     const btns=owner&&idx?`<span class="row-acts">
-      <button type="button" class="btn-sell" onclick="postAction('sell_goods_item',{target:${JSON.stringify(String(idx))}})">Продать${price?' · ~'+price:''}</button>
+      <button type="button" class="btn-sell" data-ui="act" data-action="sell_goods_item" data-target="${escAttr(String(idx))}">Продать${price?' · ~'+price:''}</button>
     </span>`:'';
     return `<div class="list-item"><img class="ico" src="assets/icons/misc.svg" alt=""><div class="txt"><b>${esc(name)}</b><small>Goods · ×${count}${price?' · ~'+price+'/шт':''}</small></div>${btns}</div>`;
   }).join('')||'<div class="list-item">Пусто — купите во вкладке Магазин</div>';
 }
 function shopList(){
+  const owner = isPanelOwner();
   return (house.shopItems||[]).slice(0,60).map(it=>{
     const id=it.ItemStringId||it.itemStringId||'';
     const name=it.Name||it.name||id;
     const price=it.UnitPrice||it.unitPrice||0;
     const avail=it.Available||it.available||0;
-    const owner=house.isOwnerViewer;
     const btns=owner&&id?`<span class="row-acts">
-      <button type="button" class="btn-sell" onclick="postAction('buy_shop_item',{target:${JSON.stringify(String(id))},value:'1'})">Купить · ${price}</button>
+      <button type="button" class="btn-sell" data-ui="act" data-action="buy_shop_item" data-target="${escAttr(String(id))}" data-value="1">Купить · ${price}</button>
     </span>`:'';
     return `<div class="list-item"><img class="ico" src="assets/icons/misc.svg" alt=""><div class="txt"><b>${esc(name)}</b><small>${esc(id)} · на рынке ${avail} · цена ${price}</small></div>${btns}</div>`;
   }).join('')||'<div class="list-item">'+(esc(house.shopStatus)||'Нет товаров на рынке')+'</div>';
 }
 function heroInventoryList(){
+  const owner = isPanelOwner();
   return (house.heroInventory||[]).slice(0,40).map(it=>{
     const name=it.Name||it.name||'';
     const idx=it.Index||it.index;
@@ -2330,10 +2334,9 @@ function heroInventoryList(){
     const icon=it.IconUrl||it.iconUrl||iconUrl(iconKey(type));
     let src=String(icon||'');
     if(src.startsWith('/')) src=src.slice(1);
-    const owner=house.isOwnerViewer;
     const btns=owner&&idx?`<span class="row-acts">
-      <button type="button" class="btn-sell" onclick="postAction('store_item',{target:${JSON.stringify(String(idx))}})">На склад</button>
-      <button type="button" class="btn-sell" onclick="postAction('sell_hero_item',{target:${JSON.stringify(String(idx))}})">Продать${price?' · '+price:''}</button>
+      <button type="button" class="btn-sell" data-ui="act" data-action="store_item" data-target="${escAttr(String(idx))}">На склад</button>
+      <button type="button" class="btn-sell" data-ui="act" data-action="sell_hero_item" data-target="${escAttr(String(idx))}">Продать${price?' · '+price:''}</button>
     </span>`:'';
     return `<div class="list-item"><img class="ico" src="${esc(src)}" alt="" onerror="this.src='assets/icons/misc.svg'"><div class="txt"><b>${esc(name)}</b><small>#${idx} · ${esc(type)}</small></div>${btns}</div>`;
   }).join('')||'<div class="list-item">Инвентарь BLT пуст (владелец видит CustomItems)</div>';
@@ -2349,13 +2352,57 @@ function historyList(){
 function actionsHtml(room){
   const acts=(house.actions||[]).filter(a=>!a.room || a.room===room || (room==='common'&&a.room==='overview'));
   if(!acts.length) return '<div class="notice">Нет доступных действий</div>';
+  const owner = isPanelOwner();
   return acts.map(a=>{
-    const dis=!a.available || !house.isOwnerViewer;
+    const dis=!a.available || !owner;
     const cost=a.cost?`<span class="cost">${Number(a.cost).toLocaleString('ru-RU')}</span>`:'';
     const hint=a.hint?`<span class="hint">${esc(a.hint)}</span>`:'';
     const cmd=a.command?`<span class="hint">${esc(a.command)}</span>`:'';
-    return `<button class="action" ${dis?'disabled':''} onclick='onAction(${JSON.stringify(a).replace(/'/g,"&#39;")})'>${esc(a.label)} ${cost}${hint}${cmd}</button>`;
+    return `<button type="button" class="action" data-ui="house-action" data-action-id="${escAttr(a.id||'')}" ${dis?'disabled':''}>${esc(a.label)} ${cost}${hint}${cmd}</button>`;
   }).join('');
+}
+
+let _rightUiBound = false;
+function bindRightContentUi(){
+  if (_rightUiBound) return;
+  const box = document.getElementById('rightContent');
+  if (!box) return;
+  _rightUiBound = true;
+  box.addEventListener('click', (ev) => {
+    const btn = ev.target && ev.target.closest ? ev.target.closest('[data-ui]') : null;
+    if (!btn || btn.disabled) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    const ui = btn.getAttribute('data-ui');
+    if (ui === 'forge-type') {
+      selectForgeType(btn.getAttribute('data-type') || '');
+      return;
+    }
+    if (ui === 'forge-unique-toggle') {
+      toggleForgeUnique();
+      return;
+    }
+    if (ui === 'forge-craft') {
+      craftSelectedForgeType();
+      return;
+    }
+    if (ui === 'act') {
+      const action = btn.getAttribute('data-action') || '';
+      const target = btn.getAttribute('data-target') || '';
+      const value = btn.getAttribute('data-value') || '';
+      const extra = {};
+      if (target) extra.target = target;
+      if (value) extra.value = value;
+      postAction(action, extra);
+      return;
+    }
+    if (ui === 'house-action') {
+      const id = btn.getAttribute('data-action-id') || '';
+      const a = (house.actions || []).find(x => x && x.id === id);
+      if (a) onAction(a);
+      else toast('Действие не найдено: ' + id);
+    }
+  });
 }
 
 function switchTab(id){
@@ -2364,7 +2411,7 @@ function switchTab(id){
 }
 
 function onAction(a){
-  if(!house.isOwnerViewer){ toast('Войди Twitch как владелец'); return; }
+  if(!isPanelOwner()){ toast('Войди Twitch как владелец'); return; }
   if(!a.available){ toast(a.disabledReason||'Недоступно'); return; }
   if(a.id==='inventory'){
     switchTab('storage');
@@ -2403,7 +2450,7 @@ function toggleForgeUnique(){
 
 async function craftSelectedForgeType(){
   if(!selectedForgeType){ toast('Сначала выбери тип в списке'); return; }
-  if(!house.isOwnerViewer){ toast('Войди Twitch как владелец'); return; }
+  if(!isPanelOwner()){ toast('Войди Twitch как владелец'); return; }
   if(house.craftingEnabled===false){ toast('Crafting отключён в Settings BlacksmithingNew'); return; }
   const action = forgeUniqueMode ? 'forge_unique' : 'forge_craft';
   await postAction(action, { target: selectedForgeType, value: selectedForgeType });
@@ -2446,6 +2493,12 @@ function closeModal(){ document.getElementById('modal').classList.remove('show')
 function copyCmd(cmd){ navigator.clipboard?.writeText(cmd); toast('Скопировано: '+cmd); setFooter('Скопировано: '+cmd); }
 function toast(text){ const el=document.getElementById('toast'); el.textContent=text; el.classList.add('show'); clearTimeout(window.__toast); window.__toast=setTimeout(()=>el.classList.remove('show'),2400); }
 function setFooter(t){ document.getElementById('footerState').textContent=t; }
+function isPanelOwner(){
+  return !!(house && (house.isOwnerViewer || isOwnerNow()));
+}
+function escAttr(s){
+  return String(s??'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
 function esc(s){ return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function cssEsc(s){
   try { return (window.CSS && CSS.escape) ? CSS.escape(String(s||'')) : String(s||'').replace(/[^a-zA-Z0-9_-]/g, '\\$&'); }
