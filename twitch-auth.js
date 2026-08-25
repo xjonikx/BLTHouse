@@ -1,4 +1,4 @@
-/* Twitch Implicit OAuth — no secret in the page. Worker checks the user token on /action. */
+/* Twitch Implicit OAuth — no secret in the page. */
 (function () {
   const KEY = "blt_twitch_token";
   const USER_KEY = "blt_twitch_user";

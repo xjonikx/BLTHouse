@@ -5,12 +5,12 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <base href="/BLTHouse/">
 <title>BLT House</title>
-<script src="config.js?v=rt16"></script>
+<script src="config.js?v=rt17"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="supabase-queue.js?v=rt16"></script>
-<script src="twitch-auth.js?v=rt16"></script>
-<script src="extension-bridge.js?v=rt16"></script>
-<script src="presence-realtime.js?v=rt16"></script>
+<script src="supabase-queue.js?v=rt17"></script>
+<script src="twitch-auth.js?v=rt17"></script>
+<script src="extension-bridge.js?v=rt17"></script>
+<script src="presence-realtime.js?v=rt17"></script>
 <style>
 :root{
   --bg:#0d0d0c;--panel:#171614;--panel2:#201e19;--panel3:#29251e;
@@ -1004,6 +1004,7 @@ function mapPerson(p){
 }
 
 function roomUnlocked(type){
+  if (!house) return false;
   const r = (house.rooms||[]).find(x=>x.type===type);
   if(type==='common'||type==='family'||type==='storage'||type==='history') return r ? r.unlocked!==false : true;
   if(type==='shop'||type==='shop_goods'||type==='shop_clothes') return roomUnlocked('yard') || !!(house.yardLevel);
@@ -1034,7 +1035,7 @@ function renderTabs(){
     const btn=document.createElement('button');
     btn.className='tab'+(currentTab===t.id?' active':'')+(unlocked?'':' locked');
     btn.textContent=unlocked?t.label:('['+t.label+']');
-    btn.onclick=()=>{ currentTab=t.id; renderAll(); announcePresenceHere(); };
+    btn.onclick=()=>{ switchTab(t.id); announcePresenceHere(); };
     nav.appendChild(btn);
   });
 }
@@ -2269,6 +2270,7 @@ function inspectPerson(p){
 }
 
 function renderSide(){
+  try {
   bindRightContentUi();
   const titles={common:'Общая',family:'Семья',workshop:'Мастерская',yard:'Двор',shop_goods:'Магазин Goods',shop_clothes:'Магазин одежды',shop:'Магазин',storage:'Хранилище',history:'История'};
   const descs={
@@ -2276,8 +2278,8 @@ function renderSide(){
     family:'Жильцы и семейная часть дома.',
     workshop:'Кузница — те же типы и Settings, что !BlacksmithingNew.',
     yard:'Животные, маунты и хозяйство.',
-    shop_goods:'Торговые Goods с рынка города дома (полный список).',
-    shop_clothes:'Гражданская одежда с рынка города дома (полный список).',
+    shop_goods:'Торговые Goods со склада города дома.',
+    shop_clothes:'Гражданская одежда со склада города дома.',
     shop:'Рынок города.',
     storage:'Склад BLT / Goods и инвентарь BLT.',
     history:'Хроника изменений дома.',
@@ -2369,6 +2371,11 @@ function renderSide(){
       <div style="margin-top:12px" class="btns">${actionsHtml('history')}</div>`;
   }
   box.innerHTML=html;
+  } catch (e) {
+    console.error('renderSide', e);
+    const box = document.getElementById('rightContent');
+    if (box) box.innerHTML = '<div class="notice warn">Ошибка панели: '+esc(String(e && e.message || e))+'</div>';
+  }
 }
 
 function projectHtml(){
@@ -2428,18 +2435,24 @@ function storageGoodsList(){
     return `<div class="list-item"><img class="ico" src="assets/icons/misc.svg" alt=""><div class="txt"><b>${esc(name)}</b><small>Goods · ×${count}${price?' · ~'+price+'/шт':''}</small></div>${btns}</div>`;
   }).join('')||'<div class="list-item">Пусто — купите во вкладке Магазин</div>';
 }
+let shopShown = { goods: 80, clothes: 80 };
+const SHOP_PAGE = 80;
+
 function shopList(kind){
   const owner = isPanelOwner();
   const all = house.shopItems||[];
   const wantClothes = String(kind||'').toLowerCase() === 'clothes';
+  const key = wantClothes ? 'clothes' : 'goods';
   const items = all.filter(it => {
     const k = String(it.ShopKind||it.shopKind||'goods').toLowerCase();
     return wantClothes ? k === 'clothes' : k !== 'clothes';
   });
   if (!items.length) {
-    return '<div class="list-item">'+(esc(house.shopStatus)||(wantClothes?'Нет гражданской одежды на рынке':'Нет Goods на рынке'))+'</div>';
+    return '<div class="list-item">'+(esc(house.shopStatus)||(wantClothes?'Нет гражданской одежды в складе города':'Нет Goods в складе города'))+'</div>';
   }
-  return items.map((it)=>{
+  const limit = Math.max(SHOP_PAGE, Number(shopShown[key]) || SHOP_PAGE);
+  const shown = items.slice(0, limit);
+  let html = shown.map((it)=>{
     const id=it.ItemStringId||it.itemStringId||'';
     const name=it.Name||it.name||id;
     const price=it.UnitPrice||it.unitPrice||0;
@@ -2452,6 +2465,10 @@ function shopList(kind){
     </span>`;
     return `<div class="list-item"><img class="ico" src="${wantClothes?'assets/icons/armor.svg':'assets/icons/misc.svg'}" alt=""><div class="txt"><b>${esc(name)}</b><small>${esc(sk)} · ${esc(id)} · на рынке ${avail} · цена ${price}</small></div>${btns}</div>`;
   }).join('');
+  if (items.length > shown.length) {
+    html += `<button type="button" class="action" data-ui="shop-more" data-kind="${escAttr(key)}" style="margin-top:8px">Показать ещё (${items.length - shown.length} из ${items.length})</button>`;
+  }
+  return html;
 }
 function heroInventoryList(){
   const owner = isPanelOwner();
@@ -2528,6 +2545,12 @@ function bindRightContentUi(){
       showItemInspect(btn.getAttribute('data-src') || '', btn.getAttribute('data-idx') || '');
       return;
     }
+    if (ui === 'shop-more') {
+      const kind = btn.getAttribute('data-kind') === 'clothes' ? 'clothes' : 'goods';
+      shopShown[kind] = (Number(shopShown[kind]) || SHOP_PAGE) + SHOP_PAGE;
+      renderSide();
+      return;
+    }
     if (ui === 'act') {
       const action = btn.getAttribute('data-action') || '';
       const target = btn.getAttribute('data-target') || '';
@@ -2595,6 +2618,11 @@ function showItemInspect(src, idx){
 }
 
 function switchTab(id){
+  if (id === 'shop') id = 'shop_goods';
+  if (currentTab !== id) {
+    if (id === 'shop_goods') shopShown.goods = SHOP_PAGE;
+    if (id === 'shop_clothes') shopShown.clothes = SHOP_PAGE;
+  }
   currentTab = id;
   renderAll();
 }
