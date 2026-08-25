@@ -5,11 +5,11 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <base href="/BLTHouse/">
 <title>BLT House</title>
-<script src="config.js?v=rt5"></script>
+<script src="config.js?v=rt6"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="twitch-auth.js?v=rt5"></script>
-<script src="extension-bridge.js?v=rt5"></script>
-<script src="presence-realtime.js?v=rt5"></script>
+<script src="twitch-auth.js?v=rt6"></script>
+<script src="extension-bridge.js?v=rt6"></script>
+<script src="presence-realtime.js?v=rt6"></script>
 <style>
 :root{
   --bg:#0d0d0c;--panel:#171614;--panel2:#201e19;--panel3:#29251e;
@@ -989,6 +989,8 @@ function mergeLayoutRooms(rooms){
 }
 function findLayoutEl(scene, key){
   if (!scene || !key) return null;
+  const byKey = scene.querySelector('[data-layout-key="'+cssEsc(key)+'"]');
+  if (byKey) return byKey;
   const idx = key.indexOf(':');
   if (idx < 0) return null;
   const kind = key.slice(0, idx);
@@ -1001,6 +1003,7 @@ function findLayoutEl(scene, key){
     let found = null;
     scene.querySelectorAll('.object, .furniture').forEach((o) => {
       if (found) return;
+      if (String(o.dataset.objectId || '') === id) { found = o; return; }
       const lab = o.querySelector('.room-object-label');
       const div = o.querySelector('div');
       const txt = String((lab && lab.textContent) || (div && div.textContent) || '');
@@ -1038,59 +1041,81 @@ function scheduleLayoutPublish(){
 async function publishLayoutRoom(reset){
   if (!canEditSceneLayout() || !isQueueMode()) return;
   const { houseId } = parseRoute();
-  if (!houseId || typeof window.BLTHouseExtPublishLayout !== 'function') return;
+  if (!houseId) return;
   const roomPositions = {};
-  Object.keys(visualPositions).forEach((key) => {
-    const p = visualPositions[key];
-    if (p && typeof p.x === 'number' && typeof p.y === 'number') roomPositions[key] = { x: p.x, y: p.y };
-  });
-  try {
-    const payload = reset ? { room: currentTab, reset: true } : { room: currentTab, positions: roomPositions };
-    const data = await window.BLTHouseExtPublishLayout(payload);
-    if (data && data.rooms) {
-      remoteLayout = { ts: data.ts || Date.now(), rev: data.rev || data.ts || 0, rooms: data.rooms };
-      layoutSince = remoteLayout.rev;
-    }
-    if (useSupabaseAtmosphere() && window.BLTHouseRealtime) {
-      try {
-        await window.BLTHouseRealtime.publishLayout({ room: currentTab, positions: roomPositions, reset: !!reset, ts: Date.now() });
-      } catch (e) {}
-    }
-  } catch (e) {}
+  if (!reset) {
+    Object.keys(visualPositions).forEach((key) => {
+      const p = visualPositions[key];
+      if (p && typeof p.x === 'number' && typeof p.y === 'number') roomPositions[key] = { x: p.x, y: p.y };
+    });
+  }
+  const ts = Date.now();
+  const rooms = Object.assign({}, remoteLayout.rooms || {}, { [currentTab]: roomPositions });
+  const localSnap = {
+    room: currentTab,
+    positions: roomPositions,
+    reset: !!reset,
+    ts,
+    rev: ts,
+    rooms,
+  };
+  remoteLayout = { ts, rev: ts, rooms };
+  layoutSince = Math.max(layoutSince, ts);
+
+  // Worker + Supabase independently — one failure must not block the other.
+  if (typeof window.BLTHouseExtPublishLayout === 'function') {
+    try {
+      const payload = reset ? { room: currentTab, reset: true } : { room: currentTab, positions: roomPositions };
+      const data = await window.BLTHouseExtPublishLayout(payload);
+      if (data && data.rooms) {
+        remoteLayout = { ts: data.ts || Date.now(), rev: data.rev || data.ts || 0, rooms: data.rooms };
+        layoutSince = Math.max(layoutSince, remoteLayout.rev);
+      }
+    } catch (e) {}
+  }
+  if (useSupabaseAtmosphere() && window.BLTHouseRealtime) {
+    try {
+      await window.BLTHouseRealtime.publishLayout(localSnap);
+    } catch (e) {}
+  }
 }
 async function layoutPollLoop(){
   if (window.__bltLayoutLoop) return;
   window.__bltLayoutLoop = true;
-  layoutSince = 0;
+  let seeded = false;
   while (window.__bltLayoutLoop) {
     if (!isQueueMode()) { await new Promise((r) => setTimeout(r, 1000)); continue; }
     const { houseId } = parseRoute();
     if (!houseId) { await new Promise((r) => setTimeout(r, 1000)); continue; }
     try {
-      const data = await window.BLTHouseExtFetchLayout(houseId, { since: layoutSince, wait: layoutSince ? 2500 : 0 });
+      const wait = seeded ? 2500 : 0;
+      const data = await window.BLTHouseExtFetchLayout(houseId, { since: layoutSince, wait });
       if (data && data.ok !== false && data.rooms) {
-        const rev = Number(data.rev || data.ts || 0);
-        if (rev > layoutSince || !layoutSince) {
-          remoteLayout = { ts: data.ts || rev, rev, rooms: data.rooms };
-          mergeLayoutRooms(data.rooms);
-          applyLayoutToScene(currentTab);
-          if (rev > layoutSince) layoutSince = rev;
-        }
+        ingestRemoteLayout(data);
       }
-    } catch (e) {}
+      seeded = true;
+      if (!wait) await new Promise((r) => setTimeout(r, 400));
+    } catch (e) {
+      seeded = true;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
   }
 }
 function ingestRemoteLayout(payload){
   if (!payload) return;
-  const rev = Number(payload.ts || Date.now());
-  if (rev <= layoutSince && layoutSince) return;
+  const rev = Number(payload.rev || payload.ts || Date.now()) || 0;
+  if (layoutSince && rev > 0 && rev < layoutSince) return;
   remoteLayout.rooms = remoteLayout.rooms || {};
   if (payload.rooms) Object.assign(remoteLayout.rooms, payload.rooms);
   if (payload.room && payload.positions) {
     remoteLayout.rooms[payload.room] = Object.assign({}, remoteLayout.rooms[payload.room] || {}, payload.positions);
   }
-  layoutSince = rev;
+  if (payload.reset && payload.room) remoteLayout.rooms[payload.room] = {};
+  remoteLayout.ts = rev || Date.now();
+  remoteLayout.rev = rev || remoteLayout.ts;
+  if (rev > layoutSince) layoutSince = rev;
   mergeLayoutRooms(remoteLayout.rooms);
+  saveVisualPositions();
   applyLayoutToScene(payload.room || currentTab);
 }
 function bindRoomFloorClick(room){
@@ -1107,6 +1132,14 @@ function bindRoomFloorClick(room){
 }
 async function walkToPoint(x, y){
   if (!twitchLoggedIn()) { toast('Войди Twitch — перемещение видно другим'); return; }
+  const left = flavorCdLeft();
+  if (left > 0) {
+    toast('Подожди ' + (left/1000).toFixed(1) + ' с');
+    return;
+  }
+  if (window.__bltFlavorBusy) return;
+  window.__bltFlavorBusy = true;
+  startFlavorCooldown();
   closeInteract();
   const pos = { x: Math.max(4, Math.min(92, x)), y: Math.max(8, Math.min(88, y)) };
   moveSelfToObject('walk', '', 'walk', pos);
@@ -1122,7 +1155,10 @@ async function walkToPoint(x, y){
     const data = await publishPresenceDual({
       pose: 'walk', object: '', room: currentTab, idle: false, x: pos.x, y: pos.y, eventId: newEventId(),
     });
-    if (data) setPresence(data);
+    if (data) {
+      setPresence(data);
+      if (data.layout) ingestRemoteLayout(data.layout);
+    }
     renderPresenceOnly();
   } catch (e) {}
   setTimeout(async () => {
@@ -1135,6 +1171,7 @@ async function walkToPoint(x, y){
       await publishPresenceDual({ idle: true, pose: 'here', room: currentTab, x: pos.x, y: pos.y });
     } catch (e) {}
   }, 700);
+  window.__bltFlavorBusy = false;
 }
 function positionKey(kind, id, fallbackX, fallbackY){
   const k = kind + ':' + String(id || '');
@@ -1356,6 +1393,8 @@ function makeObject(scene, name, state, x, y, icon){
   const pos = positionKey('object', id, x, y);
   const cls = furnitureClass(name);
   const d = document.createElement('div');
+  d.dataset.objectId = String(id);
+  d.dataset.layoutKey = 'object:' + String(id);
   if (cls) {
     d.className = 'furniture ' + cls;
     d.style.left = pos.x + '%';
@@ -1407,6 +1446,7 @@ function flavorLines(kind, name){
     window:[{pose:'look', label:'Смотреть в окно'}],
     material:[{pose:'sort', label:'Перебрать запасы'}],
     food:[{pose:'smell', label:'Понюхать припасы'}],
+    person:[{pose:'look', label:'Осмотреть'},{pose:'wave', label:'Помахать'}],
     misc:[{pose:'look', label:'Осмотреть'}],
   };
   return map[kind]||map.misc;
@@ -1444,9 +1484,9 @@ function closeInteract(){
   if(el) el.classList.remove('show');
 }
 
-function openInteract(ev, name, state, targetEl){
+function openInteract(ev, name, state, targetEl, kindOverride){
   const pop=document.getElementById('interactPop');
-  const kind=objectKind(name);
+  const kind = kindOverride || objectKind(name);
   if (targetEl) {
     const x = parseFloat(targetEl.style.left);
     const y = parseFloat(targetEl.style.top);
@@ -1626,15 +1666,31 @@ function applyRealtimeActors(actors){
 }
 
 function resolveObjectPos(objectName, kind){
-  let tx = lastInteractPos && lastInteractPos.x;
-  let ty = lastInteractPos && lastInteractPos.y;
-  const scene = document.querySelector('.scene.active');
+  let tx = null;
+  let ty = null;
+  const want = String(objectName || '').toLowerCase();
+  if (lastInteractPos && String(lastInteractPos.name || '').toLowerCase() === want) {
+    tx = lastInteractPos.x;
+    ty = lastInteractPos.y;
+  }
+  const scene = document.querySelector('.scene.active .mobile-room') || document.querySelector('.scene.active');
+  if ((tx == null || ty == null) && scene) {
+    const people = scene.querySelectorAll('.room-person');
+    for (const p of people) {
+      const nm = String((p.querySelector('.name') && p.querySelector('.name').textContent) || '').toLowerCase();
+      if (want && (nm === want || nm.includes(want) || want.includes(nm))) {
+        tx = parseFloat(p.style.left);
+        ty = parseFloat(p.style.top);
+        break;
+      }
+    }
+  }
   if ((tx == null || ty == null) && scene) {
     const objs = scene.querySelectorAll('.object,.furniture');
     for (const o of objs) {
       const lab = o.querySelector('.room-object-label') || o.querySelector('div');
       const txt = String((lab && lab.textContent) || '').toLowerCase();
-      if (txt.includes(String(objectName||'').toLowerCase())) {
+      if (want && txt.includes(want)) {
         tx = parseFloat(o.style.left);
         ty = parseFloat(o.style.top);
         break;
@@ -1645,8 +1701,9 @@ function resolveObjectPos(objectName, kind){
     tx = 40 + Math.random() * 20;
     ty = 45 + Math.random() * 15;
   }
-  const nearX = Math.max(4, Math.min(92, tx + (kind === 'bed' || kind === 'rest' ? 0 : (Math.random() < 0.5 ? -8 : 8))));
-  const nearY = Math.max(8, Math.min(88, ty + (kind === 'bed' || kind === 'rest' ? 4 : 0)));
+  const beside = kind === 'person' || kind === 'look' || kind === 'wave';
+  const nearX = Math.max(4, Math.min(92, tx + (kind === 'bed' || kind === 'rest' ? 0 : (beside ? (Math.random() < 0.5 ? -7 : 7) : (Math.random() < 0.5 ? -8 : 8)))));
+  const nearY = Math.max(8, Math.min(88, ty + (kind === 'bed' || kind === 'rest' ? 4 : (beside ? 2 : 0))));
   return { x: nearX, y: nearY };
 }
 
@@ -1765,6 +1822,7 @@ function findOrCreatePresenceAvatar(scene, actor){
   el.className = 'room-person presence-visitor guest';
   el.dataset.presenceLogin = login;
   el.dataset.personId = 'presence:' + login;
+  el.dataset.layoutKey = 'person:presence:' + login;
   const x = actor.x != null ? Number(actor.x) : (20 + Math.random() * 50);
   const y = actor.y != null ? Number(actor.y) : (40 + Math.random() * 30);
   el.style.left = x + '%';
@@ -1773,7 +1831,7 @@ function findOrCreatePresenceAvatar(scene, actor){
   el.onclick = (ev) => {
     if (sceneMode === 'move') return;
     ev.stopPropagation();
-    openInteract(ev, actor.display || login, actor.pose || 'в панели');
+    openInteract(ev, actor.display || login, actor.pose || 'в панели', el, 'person');
   };
   scene.appendChild(el);
   return el;
@@ -1934,6 +1992,7 @@ async function presenceLongPollLoop(){
           setPresence(data);
           renderPresenceOnly();
         }
+        if (data.layout) ingestRemoteLayout(data.layout);
         const rev = Number(data.rev || 0);
         if (rev > since) since = rev;
         else if (!since) since = Number(data.eventRev || data.ts || Date.now());
@@ -1955,12 +2014,13 @@ function placePeople(scene, people){
     const isGuest=!!(p.isGuest||p.IsGuest||String(p.role||p.Role||'').toLowerCase().includes('гост'));
     el.className='room-person'+(isGuest?' guest':'');
     el.dataset.personId = String(id);
+    el.dataset.layoutKey = 'person:' + String(id);
     el.style.left=pos.x+'%'; el.style.top=pos.y+'%';
     el.innerHTML=`<div class="body"></div><div class="name">${esc(p.name||p.Name||'?')}</div><div class="state">${esc(p.state||p.State||p.role||p.Role||'')}</div>`;
     el.onclick=(ev)=>{
       if(sceneMode==='move') return;
       ev.stopPropagation();
-      openInteract(ev, p.name||p.Name||'Персонаж', p.state||p.role||'');
+      openInteract(ev, p.name||p.Name||'Персонаж', p.state||p.role||'', el, 'person');
       inspectPerson(p);
     };
     bindSceneDrag(el, scene, 'person', id, pos);
