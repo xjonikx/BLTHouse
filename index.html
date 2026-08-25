@@ -5,12 +5,12 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <base href="/BLTHouse/">
 <title>BLT House</title>
-<script src="config.js?v=rt20"></script>
+<script src="config.js?v=rt21"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="supabase-queue.js?v=rt20"></script>
-<script src="twitch-auth.js?v=rt20"></script>
-<script src="extension-bridge.js?v=rt20"></script>
-<script src="presence-realtime.js?v=rt20"></script>
+<script src="supabase-queue.js?v=rt21"></script>
+<script src="twitch-auth.js?v=rt21"></script>
+<script src="extension-bridge.js?v=rt21"></script>
+<script src="presence-realtime.js?v=rt21"></script>
 <style>
 :root{
   --bg:#0d0d0c;--panel:#171614;--panel2:#201e19;--panel3:#29251e;
@@ -603,9 +603,41 @@ function purgeFatHouseCache(){
       const k = sessionStorage.key(i);
       if (!k || k.indexOf('blt_house_last_') !== 0) continue;
       const v = sessionStorage.getItem(k);
-      if (v && v.length > 120000) sessionStorage.removeItem(k);
+      if (!v || v.length > 80000) sessionStorage.removeItem(k);
     }
   } catch (e) {}
+}
+
+function capVisualPositions(){
+  try {
+    const keys = Object.keys(visualPositions || {});
+    if (keys.length > 400) {
+      const trimmed = {};
+      keys.slice(-200).forEach(k => { trimmed[k] = visualPositions[k]; });
+      visualPositions = trimmed;
+      saveVisualPositions();
+    }
+  } catch (e) {}
+}
+
+function hasWorkerBackend(){
+  const c = window.BLT_HOUSE_EXT || {};
+  return !!(String(c.ebsUrl || c.queueUrl || '').trim());
+}
+
+function promiseTimeout(p, ms, fallback){
+  return Promise.race([
+    p,
+    new Promise(resolve => setTimeout(() => resolve(fallback), ms)),
+  ]);
+}
+
+function bootWithStub(houseId, viewer){
+  house = applyPanelHouse(queueStub(houseId, viewer));
+  showApp();
+  renderAll();
+  refreshGameStatusUi();
+  setFooter('Загрузка состояния…');
 }
 
 function scheduleRenderAll(){
@@ -2695,7 +2727,7 @@ function switchTab(id){
   }
   currentTab = id;
   renderAll();
-  if (isShopTab(id) && isPanelOwner() && (!(house.shopItems||[]).length)) {
+  if (isShopTab(id) && isPanelOwner() && isGameOnline() && (!(house.shopItems||[]).length)) {
     postAction('refresh_shop', { value: 'refresh' });
   }
 }
@@ -2914,12 +2946,9 @@ async function startAtmosphere(){
   }
 
   await announcePresenceHere();
-  // Furniture seed/backup from Worker (objects only). Live furniture also via Supabase broadcast.
-  if (!window.__bltLayoutLoop) layoutPollLoop();
-  // People / walk: Worker long-poll only if Supabase is off or failed.
-  if (!supabaseOk && !window.__bltPresenceLoop) presenceLongPollLoop();
-  if (supabaseOk) {
-    // Quiet Worker idle ping so "кто здесь" survives if a guest has no WS — no DOM apply.
+  if (hasWorkerBackend() && !window.__bltLayoutLoop) layoutPollLoop();
+  if (!supabaseOk && hasWorkerBackend() && !window.__bltPresenceLoop) presenceLongPollLoop();
+  if (supabaseOk && hasWorkerBackend()) {
     setInterval(() => { pollPresenceOnce(); }, 15000);
   }
 }
@@ -2930,40 +2959,34 @@ async function startAtmosphere(){
     if(pop && !pop.contains(e.target) && !e.target.closest('.object,.furniture,.room-person')) closeInteract();
   });
   setupSceneTools();
-
-  // IMPORTANT: external services must never block page startup.
-  // Twitch initialization runs in the background with a hard 5s race.
-  try {
-    if (window.BLTHouseTwitch && typeof window.BLTHouseTwitch.init === 'function') {
-      Promise.race([
-        Promise.resolve().then(() => window.BLTHouseTwitch.init()),
-        new Promise((resolve) => setTimeout(resolve, 5000))
-      ]).catch((e) => console.warn('Twitch init', e));
-    }
-  } catch (e) {
-    console.warn('Twitch init', e);
-  }
-
-  updateAuthUi();
+  capVisualPositions();
   purgeFatHouseCache();
 
-  // State loading is deliberately detached from boot.
-  // A broken network/Supabase connection can never freeze the page.
-  Promise.resolve(refresh(true)).catch((e) => {
-    console.warn('initial refresh', e);
-  });
+  await promiseTimeout(window.BLTHouseTwitch ? window.BLTHouseTwitch.init() : Promise.resolve(), 6000, null);
+  updateAuthUi();
+
+  const route = parseRoute();
+  if (route.houseId && isQueueMode()) {
+    bootWithStub(route.houseId, route.viewer);
+  }
+
+  refresh(true).catch(() => {});
+
   if (!gameStatusTimer) gameStatusTimer = setInterval(() => refreshGameStatusUi(), 5000);
+
   if (!isQueueMode()) {
-    pollTimer=setInterval(()=>refresh(false), 2000);
-  } else {
-    refreshGameStatusUi();
-    setFooter(isOwnerNow()
-      ? 'Владелец · очередь в игру'
-      : (twitchLoggedIn()
-        ? 'Гость · кликай объекты'
-        : 'Просмотр · войди Twitch'));
-    const {houseId} = parseRoute();
-    if (useSupabaseQueue() && houseId && window.BLTHouseSupabaseQueue.subscribeState) {
+    pollTimer = setInterval(() => refresh(false), 2000);
+    return;
+  }
+
+  refreshGameStatusUi();
+  setFooter(isOwnerNow()
+    ? 'Владелец · очередь в игру'
+    : (twitchLoggedIn() ? 'Гость · кликай объекты' : 'Просмотр · войди Twitch'));
+
+  const {houseId} = route;
+  if (useSupabaseQueue() && houseId && window.BLTHouseSupabaseQueue.subscribeState) {
+    promiseTimeout(
       window.BLTHouseSupabaseQueue.subscribeState(houseId, {
         onState: (packed) => {
           if (!packed || !packed.house) return;
@@ -2976,18 +2999,16 @@ async function startAtmosphere(){
           scheduleRenderAll();
           renderPresenceOnly();
         },
-      }).catch((e) => {
-        console.warn('Supabase state subscribe', e);
-      });
-      pollTimer = setInterval(() => refresh(false), 20000);
-    } else {
-      pollTimer = setInterval(() => refresh(false), 3000);
-    }
-    // Atmosphere is also background-only. It must never hold boot hostage.
-    Promise.resolve(startAtmosphere()).catch((e) => {
-      console.warn('atmosphere startup', e);
-    });
+      }),
+      12000,
+      false
+    ).catch(() => {});
+    pollTimer = setInterval(() => refresh(false), 30000);
+  } else {
+    pollTimer = setInterval(() => refresh(false), 3000);
   }
+
+  startAtmosphere().catch(() => {});
 })();
 </script>
 </body>
