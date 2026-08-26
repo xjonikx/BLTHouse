@@ -86,6 +86,11 @@
       { id: actionId, actionId: actionId }
     );
 
+    if (typeof window.BLTHouseAssertGameOnlineForAction === "function") {
+      const block = window.BLTHouseAssertGameOnlineForAction(action);
+      if (block) throw block;
+    }
+
     const c = cfg();
     const sb = supabaseQueue();
     if (sb) {

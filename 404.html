@@ -5,12 +5,12 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <base href="/BLTHouse/">
 <title>BLT House</title>
-<script src="config.js?v=rt29"></script>
+<script src="config.js?v=rt31"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="supabase-queue.js?v=rt29"></script>
-<script src="twitch-auth.js?v=rt29"></script>
-<script src="extension-bridge.js?v=rt29"></script>
-<script src="presence-realtime.js?v=rt29"></script>
+<script src="supabase-queue.js?v=rt31"></script>
+<script src="twitch-auth.js?v=rt31"></script>
+<script src="extension-bridge.js?v=rt31"></script>
+<script src="presence-realtime.js?v=rt31"></script>
 <style>
 :root{
   --bg:#0d0d0c;--panel:#171614;--panel2:#201e19;--panel3:#29251e;
@@ -1212,28 +1212,23 @@ function stripPersonKeysFromRooms(rooms){
   return out;
 }
 /**
- * Atmosphere live updates go through Supabase WebSocket when available.
- * Worker presence is only a backup for "who is online" (idle), not for walk/layout echo.
+ * Atmosphere live updates go through atmosphere SQL Realtime only.
+ * Worker is NOT used for atmosphere when Supabase atmosphere is configured.
  */
 async function publishPresenceDual(payload){
   const eventId = payload && payload.eventId ? payload.eventId : ((payload && payload.idle) ? null : newEventId());
   const body = Object.assign({}, payload || {});
   if (eventId) body.eventId = eventId;
-  let workerData = null;
 
   if (useSupabaseAtmosphere() && window.BLTHouseRealtime) {
     try { await window.BLTHouseRealtime.publishFlavor(body); } catch (e) {}
-    // Idle heartbeat to Worker keeps "кто здесь" if someone has no Supabase; never use Worker reply to move avatars.
-    if (body.idle === true && typeof window.BLTHouseExtPublishPresence === 'function') {
-      try { workerData = await window.BLTHouseExtPublishPresence(body); } catch (e) {}
-    }
-    return workerData;
+    return null;
   }
 
   if (typeof window.BLTHouseExtPublishPresence === 'function') {
-    try { workerData = await window.BLTHouseExtPublishPresence(body); } catch (e) {}
+    try { return await window.BLTHouseExtPublishPresence(body); } catch (e) {}
   }
-  return workerData;
+  return null;
 }
 async function announcePresenceHere(){
   if (!isQueueMode() || !twitchLoggedIn()) return;
@@ -1340,9 +1335,10 @@ async function publishLayoutRoom(reset){
     rooms,
   };
 
-  // Furniture: atmosphere SQL (blt_atm_layout) + postgres_changes WS. Worker optional backup.
+  // Furniture: atmosphere SQL only when configured.
   if (useSupabaseAtmosphere() && window.BLTHouseRealtime) {
     try { await window.BLTHouseRealtime.publishLayout(localSnap); } catch (e) {}
+    return;
   }
   if (typeof window.BLTHouseExtPublishLayout === 'function') {
     try {
@@ -2001,33 +1997,44 @@ function ingestFlavorEvent(e){
 
 function applyRealtimeActors(actors){
   ensureSelfPresence();
-  const prev = presence.actors || {};
+  const me = String((window.BLTHouseTwitch && window.BLTHouseTwitch.user && window.BLTHouseTwitch.user.login) || '').toLowerCase();
   const next = {};
   Object.keys(actors || {}).forEach((k) => {
     const remote = actors[k];
-    const cur = prev[k];
-    // Presence sync is source of truth for who is online (join/leave immediate).
-    if (!cur || Number(remote.ts || 0) >= Number(cur.ts || 0)) {
-      next[k] = Object.assign({}, cur || {}, remote, {
-        x: remote.x != null ? Number(remote.x) : (cur && cur.x),
-        y: remote.y != null ? Number(remote.y) : (cur && cur.y),
-      });
-    } else {
-      next[k] = Object.assign({}, remote, cur, {
-        x: cur.x != null ? cur.x : remote.x,
-        y: cur.y != null ? cur.y : remote.y,
-      });
-    }
+    if (!remote || remote.online === false) return;
+    next[String(k).toLowerCase()] = Object.assign({}, remote, {
+      x: remote.x != null ? Number(remote.x) : null,
+      y: remote.y != null ? Number(remote.y) : null,
+      ts: Number(remote.ts || Date.now()),
+    });
   });
-  const me = String((window.BLTHouseTwitch && window.BLTHouseTwitch.user && window.BLTHouseTwitch.user.login) || '').toLowerCase();
-  // Keep only self if briefly missing from a sync; never keep remote ghosts after leave.
-  if (me && prev[me] && !next[me]) next[me] = prev[me];
-  if (me && prev[me] && next[me] && Number(prev[me].ts || 0) > Number(next[me].ts || 0)) {
-    next[me] = prev[me];
+  if (me && presence.actors && presence.actors[me] && !next[me]) {
+    next[me] = presence.actors[me];
   }
   presence.actors = next;
   presence.ts = Date.now();
   syncPresenceAvatars();
+}
+
+function applyOneActor(actor){
+  if (!actor || !actor.login) return;
+  const login = String(actor.login).toLowerCase();
+  presence.actors = presence.actors || {};
+  if (actor.online === false) {
+    delete presence.actors[login];
+    syncPresenceAvatars();
+    return;
+  }
+  const prev = presence.actors[login] || {};
+  if (Number(actor.ts || 0) < Number(prev.ts || 0)) return;
+  presence.actors[login] = Object.assign({}, prev, actor, {
+    login,
+    x: actor.x != null ? Number(actor.x) : prev.x,
+    y: actor.y != null ? Number(actor.y) : prev.y,
+    ts: Number(actor.ts || Date.now()),
+  });
+  presence.ts = Date.now();
+  animatePresenceActor(presence.actors[login]);
 }
 
 function resolveObjectPos(objectName, kind){
@@ -2967,7 +2974,7 @@ function toggleTwitchAuth(){
   if(t.user){
     t.logout();
     updateAuthUi();
-    if (window.BLTHouseRealtime) window.BLTHouseRealtime.disconnect();
+    if (window.BLTHouseRealtime) window.BLTHouseRealtime.disconnect(true);
     if(house){ house=applyPanelHouse(house); renderAll(); }
   } else t.login();
 }
@@ -2986,6 +2993,9 @@ async function startAtmosphere(){
         if (msg.kind === 'actors') {
           applyRealtimeActors(msg.actors);
           renderPresenceOnly();
+        } else if (msg.kind === 'actor') {
+          applyOneActor(msg.actor);
+          renderPresenceOnly();
         } else if (msg.kind === 'flavor') {
           ingestFlavorEvent(msg.event);
           renderPresenceOnly();
@@ -2995,22 +3005,22 @@ async function startAtmosphere(){
         }
       },
     });
-    // Layout seed already came from blt_atm_layout (or empty) during connect.
     if (supabaseOk) layoutReadyFromServer = true;
     refreshGameStatusUi();
-    if (!supabaseOk) setFooter('Realtime не подключился — запасной канал Worker');
-    else if (isOwnerNow()) setFooter('Владелец · очередь в игру');
+    if (!supabaseOk) setFooter('Атмосфера SQL Realtime НЕ подключена');
+    else if (isOwnerNow()) setFooter('Владелец · атмосфера SQL OK');
+    else setFooter('Атмосфера · SQL Realtime OK');
   } else if (useSupabaseAtmosphere() && !twitchLoggedIn()) {
     setFooter('Войди Twitch для атмосферы');
     refreshGameStatusUi();
   }
 
   await announcePresenceHere();
-  // Worker layout poll only as backup when atmosphere SQL is not the primary store.
-  if (hasWorkerBackend() && !useSupabaseAtmosphere() && !window.__bltLayoutLoop) layoutPollLoop();
-  if (!supabaseOk && hasWorkerBackend() && !window.__bltPresenceLoop) presenceLongPollLoop();
-  if (supabaseOk && hasWorkerBackend()) {
-    setInterval(() => { pollPresenceOnce(); }, 15000);
+
+  // Atmosphere on → only SQL realtime. Worker loops only if atmosphere is off.
+  if (!useSupabaseAtmosphere()) {
+    if (hasWorkerBackend() && !window.__bltLayoutLoop) layoutPollLoop();
+    if (hasWorkerBackend() && !window.__bltPresenceLoop) presenceLongPollLoop();
   }
 }
 

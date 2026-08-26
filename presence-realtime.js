@@ -1,19 +1,16 @@
-/* Atmosphere realtime — SEPARATE Supabase project (own WebSocket / GoTrueClient).
- * Live people: Presence over WebSocket (channel.track).
- * Durable furniture + last poses: SQL tables + postgres_changes over WebSocket.
- * Never uses channel.send() broadcast (that path falls back to REST and spams warnings). */
+/* Atmosphere = SEPARATE Supabase project (own WebSocket).
+ * Truth = SQL only (blt_atm_layout + blt_atm_actors).
+ * Sync = postgres_changes only. No Presence, no poll, no broadcast REST. */
 (function () {
   const cfg = () => window.BLT_HOUSE_EXT || {};
   const SUBSCRIBE_TIMEOUT_MS = 12000;
-  const ACTOR_UPSERT_MS = 400;
+  const ACTOR_WRITE_MS = 120;
 
   function atmosphereUrl() {
-    const c = cfg();
-    return String(c.atmosphereSupabaseUrl || "").trim();
+    return String((cfg().atmosphereSupabaseUrl) || "").trim();
   }
   function atmosphereKey() {
-    const c = cfg();
-    return String(c.atmosphereSupabaseAnonKey || "").trim();
+    return String((cfg().atmosphereSupabaseAnonKey) || "").trim();
   }
 
   function enabled() {
@@ -24,9 +21,10 @@
   let channel = null;
   let houseId = "";
   let onUpdate = null;
-  let subscribed = false;
-  let actorUpsertTimer = null;
-  let pendingActorRow = null;
+  let connected = false;
+  let selfLogin = "";
+  let actorWriteTimer = null;
+  let pendingActor = null;
 
   function getClient() {
     if (!enabled()) return null;
@@ -65,32 +63,22 @@
     });
   }
 
-  function applyPresenceState(state) {
-    const actors = {};
-    Object.keys(state || {}).forEach(function (key) {
-      const metas = (state[key] && state[key].metas) || [];
-      const m = metas[metas.length - 1];
-      if (!m || !m.login) return;
-      actors[String(m.login).toLowerCase()] = {
-        login: m.login,
-        display: m.display || m.login,
-        pose: m.pose || "here",
-        object: m.object || "",
-        room: m.room || "",
-        x: m.x != null ? Number(m.x) : null,
-        y: m.y != null ? Number(m.y) : null,
-        ts: Number(m.ts || Date.now()),
-      };
-    });
-    return actors;
+  function rowToActor(row) {
+    if (!row || !row.login) return null;
+    return {
+      login: row.login,
+      display: row.display || row.login,
+      pose: row.pose || "here",
+      object: row.object || "",
+      room: row.room || "",
+      x: row.x != null ? Number(row.x) : null,
+      y: row.y != null ? Number(row.y) : null,
+      ts: Number(row.ts || Date.now()),
+      online: row.online !== false,
+    };
   }
 
-  function emitActors() {
-    if (!onUpdate || !channel) return;
-    onUpdate({ kind: "actors", actors: applyPresenceState(channel.presenceState()) });
-  }
-
-  function emitLayoutFromRow(row) {
+  function emitLayoutRow(row) {
     if (!onUpdate || !row) return;
     onUpdate({
       kind: "layout",
@@ -103,7 +91,25 @@
     });
   }
 
-  async function loadLayoutFromSql() {
+  function emitActorRow(row) {
+    if (!onUpdate || !row) return;
+    const actor = rowToActor(row);
+    if (!actor) return;
+    onUpdate({ kind: "actor", actor: actor });
+  }
+
+  function emitActorsMap(rows) {
+    if (!onUpdate) return;
+    const actors = {};
+    (rows || []).forEach(function (row) {
+      const a = rowToActor(row);
+      if (!a || !a.online) return;
+      actors[String(a.login).toLowerCase()] = a;
+    });
+    onUpdate({ kind: "actors", actors: actors });
+  }
+
+  async function loadLayout() {
     const sb = getClient();
     if (!sb || !houseId) return null;
     const { data, error } = await sb
@@ -115,7 +121,19 @@
     return data || null;
   }
 
-  async function upsertLayoutToSql(snap) {
+  async function loadOnlineActors() {
+    const sb = getClient();
+    if (!sb || !houseId) return [];
+    const { data, error } = await sb
+      .from("blt_atm_actors")
+      .select("house_id,login,display,pose,object,room,x,y,ts,online,updated_at")
+      .eq("house_id", houseId)
+      .eq("online", true);
+    if (error) throw error;
+    return data || [];
+  }
+
+  async function upsertLayout(snap) {
     const sb = getClient();
     if (!sb || !houseId) throw new Error("atmosphere_not_ready");
     const rev = Number(snap.rev || snap.ts || Date.now()) || Date.now();
@@ -137,38 +155,51 @@
     return data;
   }
 
-  async function flushActorUpsert() {
-    const row = pendingActorRow;
-    pendingActorRow = null;
-    actorUpsertTimer = null;
-    if (!row || !houseId) return;
+  async function upsertActorNow(row) {
     const sb = getClient();
-    if (!sb) return;
-    try {
-      await sb.from("blt_atm_actors").upsert(
-        {
-          house_id: houseId,
-          login: String(row.login).toLowerCase(),
-          display: row.display || row.login,
-          pose: row.pose || "here",
-          object: row.object || "",
-          room: row.room || "",
-          x: row.x != null ? Number(row.x) : null,
-          y: row.y != null ? Number(row.y) : null,
-          ts: Number(row.ts || Date.now()),
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: "house_id,login" }
-      );
-    } catch (e) {}
+    if (!sb || !houseId || !row || !row.login) return null;
+    const payload = {
+      house_id: houseId,
+      login: String(row.login).toLowerCase(),
+      display: row.display || row.login,
+      pose: row.pose || "here",
+      object: row.object || "",
+      room: row.room || "",
+      x: row.x != null ? Number(row.x) : null,
+      y: row.y != null ? Number(row.y) : null,
+      ts: Number(row.ts || Date.now()),
+      online: row.online !== false,
+      updated_at: new Date().toISOString(),
+    };
+    const { data, error } = await sb
+      .from("blt_atm_actors")
+      .upsert(payload, { onConflict: "house_id,login" })
+      .select("house_id,login,display,pose,object,room,x,y,ts,online")
+      .maybeSingle();
+    if (error) throw error;
+    return data;
   }
 
-  function scheduleActorUpsert(row) {
-    pendingActorRow = row;
-    if (actorUpsertTimer) return;
-    actorUpsertTimer = setTimeout(function () {
-      flushActorUpsert();
-    }, ACTOR_UPSERT_MS);
+  function flushActorWrite() {
+    const row = pendingActor;
+    pendingActor = null;
+    actorWriteTimer = null;
+    if (!row) return;
+    upsertActorNow(row).catch(function () {});
+  }
+
+  function queueActorWrite(row, immediate) {
+    pendingActor = row;
+    if (immediate) {
+      if (actorWriteTimer) {
+        clearTimeout(actorWriteTimer);
+        actorWriteTimer = null;
+      }
+      flushActorWrite();
+      return;
+    }
+    if (actorWriteTimer) return;
+    actorWriteTimer = setTimeout(flushActorWrite, ACTOR_WRITE_MS);
   }
 
   window.BLTHouseRealtime = {
@@ -177,76 +208,102 @@
     async connect(hid, handlers) {
       onUpdate = handlers && handlers.onUpdate;
       houseId = hid || "";
-      await this.disconnect();
+      await this.disconnect(false);
       if (!enabled() || !houseId) return false;
 
       const sb = getClient();
       if (!sb) return false;
 
       const twitch = window.BLTHouseTwitch || {};
-      const login = (twitch.user && twitch.user.login) || "";
-      const display = (twitch.user && twitch.user.display) || login;
+      selfLogin = String((twitch.user && twitch.user.login) || "").toLowerCase();
+      const display = (twitch.user && twitch.user.display) || selfLogin;
 
-      // Seed durable layout from SQL (furniture survives refresh / empty Presence).
+      channel = sb.channel("blt-atm-sql:" + houseId);
+      channel.on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "blt_atm_layout", filter: "house_id=eq." + houseId },
+        function (payload) {
+          if (payload.eventType === "DELETE") return;
+          if (payload.new) emitLayoutRow(payload.new);
+        }
+      );
+      channel.on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "blt_atm_actors", filter: "house_id=eq." + houseId },
+        function (payload) {
+          if (payload.eventType === "DELETE") {
+            if (payload.old && payload.old.login) {
+              onUpdate && onUpdate({
+                kind: "actor",
+                actor: { login: payload.old.login, online: false, ts: Date.now() },
+              });
+            }
+            return;
+          }
+          if (payload.new) emitActorRow(payload.new);
+        }
+      );
+
+      const ok = await subscribeWithTimeout(channel);
+      connected = !!ok;
+      if (!ok) return false;
+
       try {
-        const layoutRow = await loadLayoutFromSql();
-        if (layoutRow) emitLayoutFromRow(layoutRow);
+        const layoutRow = await loadLayout();
+        if (layoutRow) emitLayoutRow(layoutRow);
         else if (onUpdate) {
           onUpdate({
             kind: "layout",
             layout: { houseId: houseId, rev: 0, ts: Date.now(), rooms: {}, empty: true },
           });
         }
+      } catch (e) {}
+
+      try {
+        const rows = await loadOnlineActors();
+        emitActorsMap(rows);
       } catch (e) {
-        // Tables missing until atmosphere.sql is applied — Presence still works.
+        emitActorsMap([]);
       }
 
-      subscribed = false;
-      channel = sb.channel("blt-house-atm:" + houseId, {
-        config: {
-          presence: { key: login || "guest-" + Math.random().toString(16).slice(2, 8) },
-        },
-      });
-
-      // Durable layout / actor rows → WebSocket (postgres_changes), not broadcast REST.
-      channel.on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "blt_atm_layout", filter: "house_id=eq." + houseId },
-        function (payload) {
-          const row = payload.new || payload.old;
-          if (row && payload.eventType !== "DELETE") emitLayoutFromRow(row);
-        }
-      );
-
-      channel.on("presence", { event: "sync" }, function () { emitActors(); });
-      channel.on("presence", { event: "join" }, function () { emitActors(); });
-      channel.on("presence", { event: "leave" }, function () { emitActors(); });
-
-      const ok = await subscribeWithTimeout(channel);
-      subscribed = !!ok;
-      if (ok && login) {
+      if (selfLogin) {
         try {
-          await channel.track({
-            login: login,
+          const me = await upsertActorNow({
+            login: selfLogin,
             display: display,
             pose: "here",
             object: "",
             room: "",
+            x: null,
+            y: null,
+            ts: Date.now(),
+            online: true,
+          });
+          if (me) emitActorRow(me);
+        } catch (e) {}
+      }
+
+      return true;
+    },
+
+    async disconnect(setOffline) {
+      if (setOffline !== false && selfLogin && houseId) {
+        try {
+          await upsertActorNow({
+            login: selfLogin,
+            display: selfLogin,
+            pose: "here",
+            online: false,
             ts: Date.now(),
           });
         } catch (e) {}
       }
-      if (ok) emitActors();
-      return ok;
-    },
-
-    async disconnect() {
-      subscribed = false;
-      if (actorUpsertTimer) {
-        clearTimeout(actorUpsertTimer);
-        actorUpsertTimer = null;
+      connected = false;
+      if (actorWriteTimer) {
+        clearTimeout(actorWriteTimer);
+        actorWriteTimer = null;
       }
-      pendingActorRow = null;
+      pendingActor = null;
       if (channel) {
         try { await channel.unsubscribe(); } catch (e) {}
         channel = null;
@@ -254,101 +311,75 @@
     },
 
     async publishFlavor(payload) {
-      if (!channel || !subscribed) throw new Error("realtime_not_connected");
+      if (!connected || !houseId) throw new Error("realtime_not_connected");
       const twitch = window.BLTHouseTwitch || {};
-      const login = (twitch.user && twitch.user.login) || "";
+      const login = String((twitch.user && twitch.user.login) || "").toLowerCase();
       if (!login) throw new Error("login_required");
-      const display = twitch.user.display || login;
-      const row = Object.assign({
+      const display = (twitch.user && twitch.user.display) || login;
+      const row = {
         login: login,
         display: display,
-        pose: "here",
-        object: "",
-        room: "",
-        text: "",
-        x: null,
-        y: null,
+        pose: (payload && payload.pose) || "here",
+        object: (payload && payload.object) || "",
+        room: (payload && payload.room) || "",
+        x: payload && payload.x != null ? Number(payload.x) : null,
+        y: payload && payload.y != null ? Number(payload.y) : null,
         ts: Date.now(),
-        id: payload.eventId || payload.id || "e" + Date.now(),
-      }, payload || {});
-      if (payload && payload.eventId) row.id = payload.eventId;
+        online: true,
+      };
 
-      const now = Date.now();
-      const sameIdle =
-        payload.idle === true &&
-        this._lastTrackPose === row.pose &&
-        row.x === this._lastTrackX &&
-        row.y === this._lastTrackY &&
-        this._lastTrackAt &&
-        now - this._lastTrackAt < 2000;
-
-      if (!sameIdle) {
-        this._lastTrackAt = now;
-        this._lastTrackPose = row.pose;
-        this._lastTrackX = row.x;
-        this._lastTrackY = row.y;
-        await channel.track({
-          login: login,
-          display: display,
-          pose: row.pose,
-          object: row.object || "",
-          room: row.room || "",
-          x: row.x,
-          y: row.y,
-          ts: row.ts,
-        });
-        // Persist last pose/xy (SQL). Live peers still get Presence WS.
-        scheduleActorUpsert({
-          login: login,
-          display: display,
-          pose: row.pose,
-          object: row.object || "",
-          room: row.room || "",
-          x: row.x,
-          y: row.y,
-          ts: row.ts,
-        });
-      }
-
-      emitActors();
-
-      // Local flavor toast (peers see pose via Presence sync — no broadcast REST).
-      if (onUpdate && payload.idle !== true && row.pose && row.pose !== "here") {
+      // Local flavor toast only for non-idle (UI); peers get SQL change.
+      if (onUpdate && payload && payload.idle !== true && row.pose && row.pose !== "here") {
         onUpdate({
           kind: "flavor",
           event: {
-            id: row.id,
+            id: (payload && (payload.eventId || payload.id)) || ("e" + Date.now()),
             login: login,
             display: display,
             pose: row.pose,
-            object: row.object || "",
-            room: row.room || "",
+            object: row.object,
+            room: row.room,
             x: row.x,
             y: row.y,
-            text: row.text || (display + " · " + row.pose + (row.object ? " · " + row.object : "")),
+            text: (payload && payload.text) || (display + " · " + row.pose + (row.object ? " · " + row.object : "")),
             ts: row.ts,
           },
         });
       }
 
-      return { ok: true, idle: !!payload.idle };
+      const immediate = !(payload && payload.idle === true);
+      queueActorWrite(row, immediate);
+      return { ok: true, idle: !!(payload && payload.idle) };
     },
 
     async publishLayout(payload) {
       if (!houseId) throw new Error("realtime_not_connected");
-      const row = await upsertLayoutToSql(
-        Object.assign({ ts: Date.now(), houseId: houseId }, payload || {})
-      );
-      // Self-apply immediately; peers get postgres_changes over the same WS channel.
-      if (row) emitLayoutFromRow(row);
+      const row = await upsertLayout(Object.assign({ ts: Date.now(), houseId: houseId }, payload || {}));
+      if (row) emitLayoutRow(row);
       return { ok: true, layout: row };
     },
 
-    async fetchLayout() {
-      const row = await loadLayoutFromSql();
-      return row
-        ? { ok: true, houseId: row.house_id, rev: Number(row.rev || 0), rooms: row.rooms || {} }
-        : { ok: true, houseId: houseId, rev: 0, rooms: {}, empty: true };
+    isConnected: function () {
+      return !!connected;
     },
   };
+
+  window.addEventListener("beforeunload", function () {
+    if (!selfLogin || !houseId || !client) return;
+    try {
+      // best-effort offline flag (beacon-style via sync XHR not available; fire upsert)
+      client.from("blt_atm_actors").upsert(
+        {
+          house_id: houseId,
+          login: selfLogin,
+          display: selfLogin,
+          pose: "here",
+          online: false,
+          ts: Date.now(),
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "house_id,login" }
+      );
+    } catch (e) {}
+  });
 })();
