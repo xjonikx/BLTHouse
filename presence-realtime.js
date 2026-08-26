@@ -1,4 +1,5 @@
-/* Atmosphere realtime via Supabase (shared client — one WebSocket). */
+/* Atmosphere realtime: Presence = sync plane; Broadcast = optional flavor log.
+ * ALWAYS uses the single shared Supabase client from supabase-queue.js (one WebSocket). */
 (function () {
   const cfg = () => window.BLT_HOUSE_EXT || {};
   const SUBSCRIBE_TIMEOUT_MS = 12000;
@@ -11,17 +12,12 @@
   let channel = null;
   let houseId = "";
   let onUpdate = null;
-
-  let client = null;
+  let subscribed = false;
 
   function getClient() {
-    if (client) return client;
-    if (!enabled()) return null;
-    const c = cfg();
-    client = window.supabase.createClient(c.supabaseUrl, c.supabaseAnonKey, {
-      realtime: { params: { eventsPerSecond: 40 } },
-    });
-    return client;
+    // One GoTrueClient / one Realtime socket for the whole page.
+    if (window.BLTHouseSupabaseGetClient) return window.BLTHouseSupabaseGetClient();
+    return null;
   }
 
   function subscribeWithTimeout(ch, ms) {
@@ -71,6 +67,15 @@
     onUpdate({ kind: "actors", actors: applyPresenceState(channel.presenceState()) });
   }
 
+  /** Fire-and-forget broadcast over WS only. Never await REST fallback (that freezes clicks). */
+  function broadcastBestEffort(event, payload) {
+    if (!channel || !subscribed) return;
+    try {
+      const p = channel.send({ type: "broadcast", event: event, payload: payload });
+      if (p && typeof p.then === "function") p.catch(function () {});
+    } catch (e) {}
+  }
+
   window.BLTHouseRealtime = {
     enabled: enabled,
 
@@ -87,6 +92,7 @@
       const login = (twitch.user && twitch.user.login) || "";
       const display = (twitch.user && twitch.user.display) || login;
 
+      subscribed = false;
       channel = sb.channel("blt-house:" + houseId, {
         config: {
           broadcast: { self: true, ack: false },
@@ -107,6 +113,7 @@
       channel.on("presence", { event: "leave" }, function () { emitActors(); });
 
       const ok = await subscribeWithTimeout(channel);
+      subscribed = !!ok;
       if (ok && login) {
         try {
           await channel.track({
@@ -124,14 +131,19 @@
     },
 
     async disconnect() {
+      subscribed = false;
       if (channel) {
         try { await channel.unsubscribe(); } catch (e) {}
         channel = null;
       }
     },
 
+    /**
+     * Sync plane = Presence.track (WS). Broadcast is optional flavor text only.
+     * Never blocks on REST fallback — that was freezing floor/object clicks.
+     */
     async publishFlavor(payload) {
-      if (!channel) throw new Error("realtime_not_connected");
+      if (!channel || !subscribed) throw new Error("realtime_not_connected");
       const twitch = window.BLTHouseTwitch || {};
       const login = (twitch.user && twitch.user.login) || "";
       if (!login) throw new Error("login_required");
@@ -151,8 +163,6 @@
       if (payload && payload.eventId) row.id = payload.eventId;
 
       const now = Date.now();
-      // Always update Presence.track on real moves/actions so join/leave + poses sync instantly.
-      // (Supabase Free rate-limits — only skip pure idle heartbeats that repeat same pose/xy.)
       const sameIdle =
         payload.idle === true &&
         this._lastTrackPose === row.pose &&
@@ -160,71 +170,49 @@
         row.y === this._lastTrackY &&
         this._lastTrackAt &&
         now - this._lastTrackAt < 2000;
+
       if (!sameIdle) {
         this._lastTrackAt = now;
         this._lastTrackPose = row.pose;
         this._lastTrackX = row.x;
         this._lastTrackY = row.y;
-        try {
-          await channel.track({
-            login: login,
-            display: display,
-            pose: row.pose,
-            object: row.object || "",
-            room: row.room || "",
-            x: row.x,
-            y: row.y,
-            ts: row.ts,
-          });
-        } catch (e) {}
+        await channel.track({
+          login: login,
+          display: display,
+          pose: row.pose,
+          object: row.object || "",
+          room: row.room || "",
+          x: row.x,
+          y: row.y,
+          ts: row.ts,
+        });
       }
 
-      if (payload.idle === true || row.pose === "here") {
-        if (row.x != null && row.y != null && payload.idle === true) {
-          try {
-            await channel.send({
-              type: "broadcast",
-              event: "flavor",
-              payload: {
-                id: row.id || "here-" + now,
-                login: login,
-                display: display,
-                pose: "here",
-                object: "",
-                room: row.room || "",
-                x: row.x,
-                y: row.y,
-                text: display + " · здесь",
-                ts: row.ts,
-              },
-            });
-          } catch (e) {}
-        }
-        emitActors();
-        return { ok: true, idle: true };
-      }
-
-      const msg = {
-        id: row.id,
-        login: login,
-        display: display,
-        pose: row.pose,
-        object: row.object || "",
-        room: row.room || "",
-        x: row.x,
-        y: row.y,
-        text: row.text || (display + " · " + row.pose + (row.object ? " · " + row.object : "")),
-        ts: row.ts,
-      };
-      await channel.send({ type: "broadcast", event: "flavor", payload: msg });
       emitActors();
-      return { ok: true, event: msg };
+
+      // Optional: flavor log / animate for peers. Presence already carries x/y/pose.
+      if (payload.idle !== true && row.pose && row.pose !== "here") {
+        broadcastBestEffort("flavor", {
+          id: row.id,
+          login: login,
+          display: display,
+          pose: row.pose,
+          object: row.object || "",
+          room: row.room || "",
+          x: row.x,
+          y: row.y,
+          text: row.text || (display + " · " + row.pose + (row.object ? " · " + row.object : "")),
+          ts: row.ts,
+        });
+      }
+
+      return { ok: true, idle: !!payload.idle };
     },
 
     async publishLayout(payload) {
-      if (!channel) throw new Error("realtime_not_connected");
+      if (!channel || !subscribed) throw new Error("realtime_not_connected");
       const row = Object.assign({ ts: Date.now(), houseId: houseId }, payload || {});
-      await channel.send({ type: "broadcast", event: "layout", payload: row });
+      broadcastBestEffort("layout", row);
       return { ok: true, layout: row };
     },
   };
