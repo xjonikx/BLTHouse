@@ -5,12 +5,12 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <base href="/BLTHouse/">
 <title>BLT House</title>
-<script src="config.js?v=rt23"></script>
+<script src="config.js?v=rt24"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="supabase-queue.js?v=rt23"></script>
-<script src="twitch-auth.js?v=rt23"></script>
-<script src="extension-bridge.js?v=rt23"></script>
-<script src="presence-realtime.js?v=rt23"></script>
+<script src="supabase-queue.js?v=rt24"></script>
+<script src="twitch-auth.js?v=rt24"></script>
+<script src="extension-bridge.js?v=rt24"></script>
+<script src="presence-realtime.js?v=rt24"></script>
 <style>
 :root{
   --bg:#0d0d0c;--panel:#171614;--panel2:#201e19;--panel3:#29251e;
@@ -576,8 +576,9 @@ let presenceTimer = null;
 let presenceJoinedAt = 0;
 let seenEventIds = new Set();
 let liveLog = [];
-const FLAVOR_CD_MS = 1200;
-const WALK_CD_MS = 700;
+/** Pause after every atmosphere click (bed / floor / flavor). */
+const FLAVOR_CD_MS = 3000;
+const WALK_CD_MS = 3000;
 let flavorCdUntil = 0;
 let walkCdUntil = 0;
 let flavorCdTimer = null;
@@ -1804,8 +1805,10 @@ function flavorCdLeft(){
 function walkCdLeft(){
   return Math.max(0, walkCdUntil - Date.now());
 }
-function startFlavorCooldown(){
-  flavorCdUntil = Date.now() + FLAVOR_CD_MS;
+function startAtmosphereCooldown(){
+  const now = Date.now();
+  flavorCdUntil = now + FLAVOR_CD_MS;
+  walkCdUntil = now + WALK_CD_MS;
   if (flavorCdTimer) clearInterval(flavorCdTimer);
   flavorCdTimer = setInterval(()=>{
     const left = Math.max(flavorCdLeft(), walkCdLeft());
@@ -1818,9 +1821,8 @@ function startFlavorCooldown(){
     if (left <= 0) { clearInterval(flavorCdTimer); flavorCdTimer = null; }
   }, 100);
 }
-function startWalkCooldown(){
-  walkCdUntil = Date.now() + WALK_CD_MS;
-}
+function startFlavorCooldown(){ startAtmosphereCooldown(); }
+function startWalkCooldown(){ startAtmosphereCooldown(); }
 
 function closeInteract(){
   const el=document.getElementById('interactPop');
@@ -1991,28 +1993,28 @@ function ingestFlavorEvent(e){
 function applyRealtimeActors(actors){
   ensureSelfPresence();
   const prev = presence.actors || {};
-  const next = Object.assign({}, prev);
-  const now = Date.now();
+  const next = {};
   Object.keys(actors || {}).forEach((k) => {
     const remote = actors[k];
     const cur = prev[k];
+    // Presence sync is source of truth for who is online (join/leave immediate).
     if (!cur || Number(remote.ts || 0) >= Number(cur.ts || 0)) {
       next[k] = Object.assign({}, cur || {}, remote, {
         x: remote.x != null ? Number(remote.x) : (cur && cur.x),
         y: remote.y != null ? Number(remote.y) : (cur && cur.y),
       });
+    } else {
+      next[k] = Object.assign({}, remote, cur, {
+        x: cur.x != null ? cur.x : remote.x,
+        y: cur.y != null ? cur.y : remote.y,
+      });
     }
   });
-  // Keep actors missing from incomplete realtime snapshots until TTL.
-  Object.keys(prev).forEach((k) => {
-    if (next[k]) return;
-    if (now - Number(prev[k].ts || 0) <= 60000) next[k] = prev[k];
-  });
   const me = String((window.BLTHouseTwitch && window.BLTHouseTwitch.user && window.BLTHouseTwitch.user.login) || '').toLowerCase();
-  if (me && prev[me] && next[me]) {
-    const local = prev[me];
-    const remote = next[me];
-    if (Number(local.ts || 0) > Number(remote.ts || 0)) next[me] = local;
+  // Keep only self if briefly missing from a sync; never keep remote ghosts after leave.
+  if (me && prev[me] && !next[me]) next[me] = prev[me];
+  if (me && prev[me] && next[me] && Number(prev[me].ts || 0) > Number(next[me].ts || 0)) {
+    next[me] = prev[me];
   }
   presence.actors = next;
   presence.ts = Date.now();

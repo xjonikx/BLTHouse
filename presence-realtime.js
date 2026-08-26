@@ -151,30 +151,32 @@
       if (payload && payload.eventId) row.id = payload.eventId;
 
       const now = Date.now();
-      const posChanged =
-        (row.x != null && row.x !== this._lastTrackX) ||
-        (row.y != null && row.y !== this._lastTrackY);
-      const shouldTrack =
-        payload.idle === true ||
-        !this._lastTrackAt ||
-        now - this._lastTrackAt > 2500 ||
-        this._lastTrackPose !== row.pose ||
-        (posChanged && now - (this._lastTrackAt || 0) > 400);
-      if (shouldTrack) {
+      // Always update Presence.track on real moves/actions so join/leave + poses sync instantly.
+      // (Supabase Free rate-limits — only skip pure idle heartbeats that repeat same pose/xy.)
+      const sameIdle =
+        payload.idle === true &&
+        this._lastTrackPose === row.pose &&
+        row.x === this._lastTrackX &&
+        row.y === this._lastTrackY &&
+        this._lastTrackAt &&
+        now - this._lastTrackAt < 2000;
+      if (!sameIdle) {
         this._lastTrackAt = now;
         this._lastTrackPose = row.pose;
         this._lastTrackX = row.x;
         this._lastTrackY = row.y;
-        channel.track({
-          login: login,
-          display: display,
-          pose: row.pose,
-          object: row.object || "",
-          room: row.room || "",
-          x: row.x,
-          y: row.y,
-          ts: row.ts,
-        }).catch(function () {});
+        try {
+          await channel.track({
+            login: login,
+            display: display,
+            pose: row.pose,
+            object: row.object || "",
+            room: row.room || "",
+            x: row.x,
+            y: row.y,
+            ts: row.ts,
+          });
+        } catch (e) {}
       }
 
       if (payload.idle === true || row.pose === "here") {
@@ -215,6 +217,7 @@
         ts: row.ts,
       };
       await channel.send({ type: "broadcast", event: "flavor", payload: msg });
+      emitActors();
       return { ok: true, event: msg };
     },
 
