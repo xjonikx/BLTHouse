@@ -1,23 +1,42 @@
-/* Atmosphere realtime: Presence = sync plane; Broadcast = optional flavor log.
- * ALWAYS uses the single shared Supabase client from supabase-queue.js (one WebSocket). */
+/* Atmosphere realtime — SEPARATE Supabase project (own WebSocket / GoTrueClient).
+ * Does NOT share a client with supabase-queue.js (game state). */
 (function () {
   const cfg = () => window.BLT_HOUSE_EXT || {};
   const SUBSCRIBE_TIMEOUT_MS = 12000;
 
-  function enabled() {
+  function atmosphereUrl() {
     const c = cfg();
-    return !!(c.supabaseUrl && c.supabaseAnonKey && window.supabase);
+    return String(c.atmosphereSupabaseUrl || "").trim();
+  }
+  function atmosphereKey() {
+    const c = cfg();
+    return String(c.atmosphereSupabaseAnonKey || "").trim();
   }
 
+  function enabled() {
+    return !!(atmosphereUrl() && atmosphereKey() && window.supabase);
+  }
+
+  let client = null;
   let channel = null;
   let houseId = "";
   let onUpdate = null;
   let subscribed = false;
 
   function getClient() {
-    // One GoTrueClient / one Realtime socket for the whole page.
-    if (window.BLTHouseSupabaseGetClient) return window.BLTHouseSupabaseGetClient();
-    return null;
+    if (!enabled()) return null;
+    if (client) return client;
+    // Unique storageKey → no "Multiple GoTrueClient" clash with state client.
+    client = window.supabase.createClient(atmosphereUrl(), atmosphereKey(), {
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false,
+        detectSessionInUrl: false,
+        storageKey: "blt-house-atmosphere-auth",
+      },
+      realtime: { params: { eventsPerSecond: 40 } },
+    });
+    return client;
   }
 
   function subscribeWithTimeout(ch, ms) {
@@ -67,7 +86,7 @@
     onUpdate({ kind: "actors", actors: applyPresenceState(channel.presenceState()) });
   }
 
-  /** Fire-and-forget broadcast over WS only. Never await REST fallback (that freezes clicks). */
+  /** Never await REST fallback — Presence.track is the sync plane. */
   function broadcastBestEffort(event, payload) {
     if (!channel || !subscribed) return;
     try {
@@ -93,7 +112,7 @@
       const display = (twitch.user && twitch.user.display) || login;
 
       subscribed = false;
-      channel = sb.channel("blt-house:" + houseId, {
+      channel = sb.channel("blt-house-atm:" + houseId, {
         config: {
           broadcast: { self: true, ack: false },
           presence: { key: login || "guest-" + Math.random().toString(16).slice(2, 8) },
@@ -138,10 +157,6 @@
       }
     },
 
-    /**
-     * Sync plane = Presence.track (WS). Broadcast is optional flavor text only.
-     * Never blocks on REST fallback — that was freezing floor/object clicks.
-     */
     async publishFlavor(payload) {
       if (!channel || !subscribed) throw new Error("realtime_not_connected");
       const twitch = window.BLTHouseTwitch || {};
@@ -190,7 +205,6 @@
 
       emitActors();
 
-      // Optional: flavor log / animate for peers. Presence already carries x/y/pose.
       if (payload.idle !== true && row.pose && row.pose !== "here") {
         broadcastBestEffort("flavor", {
           id: row.id,

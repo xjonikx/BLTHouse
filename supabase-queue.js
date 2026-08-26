@@ -1,15 +1,21 @@
-/* BLT House: single shared Supabase client (queue state + atmosphere presence).
- * One createClient → one GoTrueClient → one Realtime WebSocket.
- * Atmosphere: presence-realtime.js channel "blt-house:{id}"
- * Game state: this file channel "blt-house-state:{id}" (postgres_changes) */
+/* BLT House STATE: Supabase actions + panel DTO (postgres_changes).
+ * Atmosphere uses a SEPARATE project — see presence-realtime.js / config.js atmosphere*. */
 (function () {
   const cfg = () => window.BLT_HOUSE_EXT || {};
   const FETCH_TIMEOUT_MS = 8000;
   const SUBSCRIBE_TIMEOUT_MS = 12000;
 
-  function enabled() {
+  function stateUrl() {
     const c = cfg();
-    return !!(c.supabaseUrl && c.supabaseAnonKey && window.supabase);
+    return String(c.stateSupabaseUrl || c.supabaseUrl || "").trim();
+  }
+  function stateKey() {
+    const c = cfg();
+    return String(c.stateSupabaseAnonKey || c.supabaseAnonKey || "").trim();
+  }
+
+  function enabled() {
+    return !!(stateUrl() && stateKey() && window.supabase);
   }
 
   let client = null;
@@ -21,15 +27,19 @@
   function getClient() {
     if (!enabled()) return null;
     if (client) return client;
-    const c = cfg();
-    client = window.supabase.createClient(c.supabaseUrl, c.supabaseAnonKey, {
-      realtime: { params: { eventsPerSecond: 40 } },
-      auth: { persistSession: false, autoRefreshToken: false },
+    client = window.supabase.createClient(stateUrl(), stateKey(), {
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false,
+        detectSessionInUrl: false,
+        storageKey: "blt-house-state-auth",
+      },
+      realtime: { params: { eventsPerSecond: 20 } },
     });
     return client;
   }
 
-  /** Sole factory — presence-realtime.js must call this (never createClient again). */
+  /** State client only — atmosphere must NOT use this. */
   window.BLTHouseSupabaseGetClient = getClient;
 
   function channelKey() {
@@ -189,9 +199,11 @@
 
   async function fetchStateRaw(houseId, viewer) {
     const c = cfg();
-    if (!c.supabaseUrl || !c.supabaseAnonKey || !houseId) return null;
+    const urlBase = stateUrl();
+    const key = stateKey();
+    if (!urlBase || !key || !houseId) return null;
     const url =
-      String(c.supabaseUrl).replace(/\/$/, "") +
+      urlBase.replace(/\/$/, "") +
       "/rest/v1/blt_house_state?house_id=eq." +
       encodeURIComponent(houseId) +
       "&select=house_id,owner_player_id,ts,last_action_id,public_house,owner_house";
@@ -199,8 +211,8 @@
     try {
       res = await fetchWithTimeout(url, {
         headers: {
-          apikey: c.supabaseAnonKey,
-          Authorization: "Bearer " + c.supabaseAnonKey,
+          apikey: key,
+          Authorization: "Bearer " + key,
           Accept: "application/json",
         },
         cache: "no-store",
