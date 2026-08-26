@@ -10,8 +10,8 @@ window.BLT_HOUSE_EXT = {
   stateSupabaseUrl: "https://lqtamumrzdlspcxfldjj.supabase.co",
   stateSupabaseAnonKey: "sb_publishable_IqzgEZTYV3d8oLP3ii2dZw_ygwWLgB0",
 
-  // ── ATMOSPHERE Supabase (presence / walk / flavor ONLY — separate project) ─
-  // No shared WebSocket with state. Enable Realtime in this project's dashboard.
+  // ── ATMOSPHERE Supabase (Presence WS + SQL layout/actors — separate project) ─
+  // Run github-pages/supabase/atmosphere.sql once on this project.
   atmosphereSupabaseUrl: "https://gwtpamejjyewtudetxru.supabase.co",
   atmosphereSupabaseAnonKey: "sb_publishable_HB4Wyk6Xq4Vai0BduqTScg_XR064Rwd",
 
