@@ -5,12 +5,12 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <base href="/BLTHouse/">
 <title>BLT House</title>
-<script src="config.js?v=rt31"></script>
+<script src="config.js?v=rt33"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="supabase-queue.js?v=rt31"></script>
-<script src="twitch-auth.js?v=rt31"></script>
-<script src="extension-bridge.js?v=rt31"></script>
-<script src="presence-realtime.js?v=rt31"></script>
+<script src="supabase-queue.js?v=rt33"></script>
+<script src="twitch-auth.js?v=rt33"></script>
+<script src="extension-bridge.js?v=rt33"></script>
+<script src="presence-realtime.js?v=rt33"></script>
 <style>
 :root{
   --bg:#0d0d0c;--panel:#171614;--panel2:#201e19;--panel3:#29251e;
@@ -227,6 +227,7 @@ header{
   padding:4px 8px;background:#141410e8;border:1px solid #63563f;color:#d1c5ad;
   font:11px Arial,sans-serif;box-shadow:0 2px 8px #0008;
 }
+.presence-chip.other-room{opacity:.75;border-color:#4a4338;color:#9c9588}
 .presence-log{margin-top:8px;font:11px Arial,sans-serif;color:#9c9588;line-height:1.4;max-height:72px;overflow:auto}
 .btn-sell{margin-left:auto;font:11px Arial,sans-serif;padding:4px 8px;border:1px solid #5b513f;background:#1c1a16;color:#ead5a4}
 .presence-bar{top:48px;bottom:auto;z-index:25}
@@ -784,7 +785,7 @@ function queueStub(houseId, viewer){
     {Id:'upgrade_stable', Label:'Улучшить конюшню', Room:'yard', Available:true},
     {Id:'expand_storage', Label:'Расширить склад', Room:'storage', Available:true},
     {Id:'unlock_guest_room', Label:'Гостевая комната', Room:'family', Available:true},
-    {Id:'expand_family', Label:'Места для семьи', Room:'family', Available:true},
+    {Id:'start_cabinet', Label:'Проект: Кабинет', Room:'workshop', Available:true},
     {Id:'inventory', Label:'Склад + инвентарь BLT', Room:'storage', Available:true},
     {Id:'sell_all', Label:'Продать весь склад BLT', Room:'storage', Available:true},
     {Id:'forge_craft', Label:'Ковать', Room:'workshop', Available:true},
@@ -1623,6 +1624,9 @@ function buildSceneContent(scene, tab){
     placePeople(scene, people);
   } else if(tab==='workshop'){
     makeObject(scene, 'Кузница '+(house.workshopLevel?roman(house.workshopLevel):'—'), house.workshopLevel?'работает':'нет', 12, 28, iconUrl('forge'));
+    const cab=(house.furniture||[]).find(f=>String(f.objectId||f.ObjectId||'').toLowerCase()==='cabinet'||(f.name||f.Name||'').toLowerCase().includes('кабинет'));
+    const hasCab=cab||(house.upgrades||[]).some(u=>String(u).toLowerCase()==='cabinet');
+    if(hasCab) makeObject(scene, 'Кабинет', cab?(cab.state||cab.State||'готов'):'готов', 45, 28, iconUrl('table'));
     makeObject(scene, 'Стойка', 'инструменты', 70, 30, iconUrl('weapon'));
     placePeople(scene, (house.residents||[]).slice(0,1));
   } else if(tab==='yard'){
@@ -1662,6 +1666,33 @@ function storageCatCount(keys){
 
 function iconUrl(key){
   return 'assets/icons/'+encodeURIComponent(key||'misc')+'.svg';
+}
+const ROOM_LABELS = {
+  common:'Общая', family:'Семья', workshop:'Мастерская', yard:'Двор',
+  shop_goods:'Магазин', shop_clothes:'Одежда', shop:'Магазин',
+  storage:'Хранилище', history:'История',
+};
+function itemPngId(it){
+  return String((it && (it.ItemStringId || it.itemStringId || it.GameId || it.gameId)) || '').trim();
+}
+function itemIconSrc(it){
+  const id = itemPngId(it);
+  if (id) return 'assets/items/item_' + id.replace(/[^\w.-]+/g, '_') + '.png';
+  let u = String((it && (it.IconUrl || it.iconUrl)) || '');
+  if (u.startsWith('/')) u = u.slice(1);
+  if (u.indexOf('assets/items/') >= 0) return u;
+  return '';
+}
+function itemIconImg(it){
+  const src = itemIconSrc(it);
+  return src ? `<img class="ico" src="${esc(src)}" alt="">` : '';
+}
+function presenceRoomId(a){
+  return String((a && a.room) || 'common').toLowerCase();
+}
+function actorInCurrentRoom(a){
+  if (!a || a.online === false) return false;
+  return presenceRoomId(a) === String(currentTab || 'common').toLowerCase();
 }
 function tabIsYard(tab){ return tab === 'yard'; }
 function placeYardFlowers(scene){
@@ -2230,8 +2261,10 @@ function syncPresenceAvatars(){
   actors.forEach(a => {
     const login = String(a.login || '').toLowerCase();
     if (!login) return;
-    if (a.room && a.room !== currentTab && a.pose === 'here') {
-      // still show in bar, but only animate if same room or has coords
+    if (!actorInCurrentRoom(a)) {
+      const el = scene.querySelector('.room-person.presence-visitor[data-presence-login="'+cssEsc(login)+'"]');
+      if (el) el.remove();
+      return;
     }
     live.add(login);
     animatePresenceActor(a);
@@ -2278,8 +2311,11 @@ function drawPresence(scene){
   }
   bar.innerHTML=actors.map(a=>{
     const self = me && String(a.login||'').toLowerCase()===me;
+    const rm = presenceRoomId(a);
+    const here = rm === String(currentTab||'common').toLowerCase();
+    const roomBit = here ? '' : (' · ' + (ROOM_LABELS[rm] || rm));
     const bit=[a.display||a.login, self && !(a.pose&&a.pose!=='here') ? 'здесь' : a.pose, a.object].filter(Boolean).join(' · ');
-    return `<div class="presence-chip">${esc(bit)}</div>`;
+    return `<div class="presence-chip${here?'':' other-room'}">${esc(bit)}${esc(roomBit)}</div>`;
   }).join('');
   scene.appendChild(bar);
 }
@@ -2295,8 +2331,11 @@ function renderPresenceOnly(){
   if(log){
     const actors = Object.values((presence && presence.actors) || {});
     const online = actors.map(a => {
+      const rm = presenceRoomId(a);
+      const here = rm === String(currentTab||'common').toLowerCase();
+      const roomBit = here ? '' : (' · ' + (ROOM_LABELS[rm] || rm));
       const bit = [a.display || a.login, a.pose && a.pose !== 'here' ? a.pose : 'здесь', a.object].filter(Boolean).join(' · ');
-      return '<div style="margin:2px 0">● ' + esc(bit) + '</div>';
+      return '<div style="margin:2px 0">● ' + esc(bit + roomBit) + '</div>';
     }).join('');
     const ev = liveLog.slice(-5).reverse();
     const act = ev.length
@@ -2424,15 +2463,15 @@ function renderSide(){
   bindRightContentUi();
   const titles={common:'Общая',family:'Семья',workshop:'Мастерская',yard:'Двор',shop_goods:'Магазин Goods',shop_clothes:'Магазин одежды',shop:'Магазин',storage:'Хранилище',history:'История'};
   const descs={
-    common:'Главная комната дома. Жильцы, гости и общие объекты.',
-    family:'Жильцы и семейная часть дома.',
-    workshop:'Кузница — те же типы и Settings, что !BlacksmithingNew.',
-    yard:'Животные, маунты и хозяйство.',
+    common:'Главная комната. Улучшение дома, приглашение гостей (другой усыновлённый герой BLT).',
+    family:'Семья из кампании Bannerlord: владелец, супруг(а) и дети — данные из сохранения.',
+    workshop:'Кузница и проект кабинета. Типы крафта = !BlacksmithingNew.',
+    yard:'Животные, маунты, магазин города (нужен открытый двор).',
     shop_goods:'Торговые Goods со склада города дома.',
     shop_clothes:'Гражданская одежда со склада города дома.',
     shop:'Рынок города.',
     storage:'Склад BLT / Goods и инвентарь BLT.',
-    history:'Хроника изменений дома.',
+    history:'Хроника дома — события из игры и панели.',
   };
   document.getElementById('rightTitle').textContent=titles[currentTab]||currentTab;
   document.getElementById('rightDesc').textContent=descs[currentTab]||'';
@@ -2450,13 +2489,16 @@ function renderSide(){
         <div class="stat"><span>ГОСТИ</span><b>${house.guestsCount||0}/${house.guestsCapacity||0}</b></div>
         <div class="stat"><span>ХРАНИЛИЩЕ</span><b>${house.storageUsed||0}/${house.storageCapacity||0}</b></div>
       </div>
-      ${projectHtml()}
       <div style="margin-top:12px" class="kicker">Кто в панели</div>
       <div class="presence-log" id="presenceLog"></div>
       <div style="margin-top:12px" class="kicker">Действия</div><div class="btns">${actionsHtml('common')}</div>`;
   } else if(currentTab==='family'){
-    html=`<div class="kicker">Жильцы</div><div class="list">${peopleList(house.residents)}</div>
-      <div style="margin-top:12px" class="kicker">Гости</div><div class="list">${peopleList(house.guests)||'<div class="list-item">Нет гостей</div>'}</div>
+    const cnt = (house.residents||[]).length;
+    html=`<div class="notice">Жильцы подтягиваются из игры: владелец, супруг(а) и дети героя BLT (${cnt}).</div>
+      <div class="kicker">Жильцы</div><div class="list">${peopleList(house.residents)||'<div class="list-item">Нет данных — обнови /state из игры</div>'}</div>
+      <div style="margin-top:12px" class="kicker">Гости</div>
+      <div class="notice" style="margin-bottom:8px">Гость = другой усыновлённый герой (!house invite). Нужна гостевая комната и свободный слот.</div>
+      <div class="list">${peopleList(house.guests)||'<div class="list-item">Нет гостей</div>'}</div>
       <div style="margin-top:12px" class="btns">${actionsHtml('family')}</div>`;
   } else if(currentTab==='workshop'){
     const types=(house.forgeItemTypes||[]).map(t=> typeof t==='string' ? t : (t && (t.name||t.Name||t.id||t.Id)) || '').map(s=>String(s).trim()).filter(Boolean);
@@ -2473,7 +2515,9 @@ function renderSide(){
     const craftOn=house.craftingEnabled!==false;
     const canCraft = !!(canRunGameActions() && selectedForgeType && craftOn);
     const uniqSel = forgeUniqueMode ? ' selected' : '';
-    html=`<div class="kicker">Кузница (!BlacksmithingNew)</div>
+    html=`<div class="notice" style="margin-bottom:8px"><b>Кабинет</b> — проект на будущее: строится в мастерской (~7 игровых дней), после завершения появляется рядом с кузницей.</div>
+      ${projectHtml()}
+      <div class="kicker">Кузница (!BlacksmithingNew)</div>
       <div class="grid">
         <div class="stat"><span>КУЗНЕЧНОЕ ДЕЛО</span><b>${skill}</b></div>
         <div class="stat"><span>МАКС. ТИР</span><b>${maxTier||'—'}</b></div>
@@ -2516,7 +2560,8 @@ function renderSide(){
       <div class="list">${heroInventoryList()}</div>
       <div style="margin-top:12px" class="btns">${actionsHtml('storage')}</div>`;
   } else if(currentTab==='history'){
-    html=`<div class="kicker">История</div><div class="list">${historyList()}</div>
+    html=`<div class="notice">Хроника дома — события из игры и панели.</div>
+    <div class="kicker">История</div><div class="list">${historyList()}</div>
       <div style="margin-top:12px" class="btns">${actionsHtml('history')}</div>`;
   }
   box.innerHTML=html;
@@ -2556,18 +2601,13 @@ function storageList(){
     const type=it.ItemType||it.itemType||it.Category||it.category||'';
     const tier=it.Tier??it.tier;
     const price=it.EstimatedSellPrice||it.estimatedSellPrice||'';
-    const icon=it.IconUrl||it.iconUrl||iconUrl(iconKey(type));
-    let src=String(icon||'');
-    if(src.startsWith('/assets/icons/')) src=src.slice(1);
-    if(!src || (src.indexOf('assets/icons/')<0 && src.indexOf('assets/heroes/')<0 && src.indexOf('assets/items/')<0 && src.indexOf('house-icons/')<0))
-      src=iconUrl(iconKey(type));
     const target = String(idx || id);
     const inspect=`<button type="button" class="btn-inspect" data-ui="inspect" data-src="storage" data-idx="${escAttr(String(idx||target))}">Осмотреть</button>`;
     const btns=`<span class="row-acts">${inspect}${owner&&target?`
       <button type="button" class="btn-sell" data-ui="act" data-action="sell_item" data-target="${escAttr(target)}">Продать${price?' · '+price:''}</button>
       <button type="button" class="btn-sell" data-ui="act" data-action="take_item" data-target="${escAttr(target)}">В инвентарь</button>`:''}
     </span>`;
-    return `<div class="list-item"><img class="ico" src="${esc(src)}" alt="" onerror="this.src='assets/icons/misc.svg'"><div class="txt"><b>${esc(name)}</b><small>${esc(type||'item')}${tier!=null?' · t'+tier:''}${it.IsUnique||it.isUnique?' · unique':''}</small></div>${btns}</div>`;
+    return `<div class="list-item">${itemIconImg(it)}<div class="txt"><b>${esc(name)}</b><small>${esc(type||'item')}${tier!=null?' · t'+tier:''}${it.IsUnique||it.isUnique?' · unique':''}</small></div>${btns}</div>`;
   }).join('')||'<div class="list-item">Пусто — куйте в мастерской или положите из инвентаря BLT</div>';
 }
 function storageGoodsList(){
@@ -2581,7 +2621,7 @@ function storageGoodsList(){
     const btns=`<span class="row-acts">${inspect}${owner&&idx?`
       <button type="button" class="btn-sell" data-ui="act" data-action="sell_goods_item" data-target="${escAttr(String(idx))}">Продать${price?' · ~'+price:''}</button>`:''}
     </span>`;
-    return `<div class="list-item"><img class="ico" src="assets/icons/misc.svg" alt=""><div class="txt"><b>${esc(name)}</b><small>Goods · ×${count}${price?' · ~'+price+'/шт':''}</small></div>${btns}</div>`;
+    return `<div class="list-item">${itemIconImg(it)}<div class="txt"><b>${esc(name)}</b><small>Goods · ×${count}${price?' · ~'+price+'/шт':''}</small></div>${btns}</div>`;
   }).join('')||'<div class="list-item">Пусто — купите во вкладке Магазин</div>';
 }
 let shopShown = { goods: 80, clothes: 80 };
@@ -2608,11 +2648,12 @@ function shopList(kind){
     const avail=it.Available||it.available||0;
     const sk=it.ShopKind||it.shopKind||'goods';
     const globalIdx = all.indexOf(it);
+    const iconSrc = itemIconSrc(it);
     const inspect=`<button type="button" class="btn-inspect" data-ui="inspect" data-src="shop" data-idx="${escAttr(String(globalIdx))}">Осмотреть</button>`;
     const btns=`<span class="row-acts">${inspect}${owner&&id?`
       <button type="button" class="btn-sell" data-ui="act" data-action="buy_shop_item" data-target="${escAttr(String(id))}" data-value="1">Купить · ${price}</button>`:''}
     </span>`;
-    return `<div class="list-item"><img class="ico" src="${wantClothes?'assets/icons/armor.svg':'assets/icons/misc.svg'}" alt=""><div class="txt"><b>${esc(name)}</b><small>${esc(sk)} · ${esc(id)} · на рынке ${avail} · цена ${price}</small></div>${btns}</div>`;
+    return `<div class="list-item">${iconSrc?`<img class="ico" src="${esc(iconSrc)}" alt="">`:''}<div class="txt"><b>${esc(name)}</b><small>${esc(sk)} · ${esc(id)} · на рынке ${avail} · цена ${price}</small></div>${btns}</div>`;
   }).join('');
   const total = wantClothes ? Number(house.shopClothesTotal||0) : Number(house.shopGoodsTotal||0);
   const haveMore = (total > 0 && items.length < total) || items.length > shown.length;
@@ -2630,15 +2671,12 @@ function heroInventoryList(){
     const type=it.ItemType||it.itemType||'';
     const tier=it.Tier??it.tier;
     const price=it.EstimatedSellPrice||it.estimatedSellPrice||'';
-    const icon=it.IconUrl||it.iconUrl||iconUrl(iconKey(type));
-    let src=String(icon||'');
-    if(src.startsWith('/')) src=src.slice(1);
     const inspect=`<button type="button" class="btn-inspect" data-ui="inspect" data-src="hero" data-idx="${escAttr(String(idx))}">Осмотреть</button>`;
     const btns=`<span class="row-acts">${inspect}${owner&&idx?`
       <button type="button" class="btn-sell" data-ui="act" data-action="store_item" data-target="${escAttr(String(idx))}">На склад</button>
       <button type="button" class="btn-sell" data-ui="act" data-action="sell_hero_item" data-target="${escAttr(String(idx))}">Продать${price?' · '+price:''}</button>`:''}
     </span>`;
-    return `<div class="list-item"><img class="ico" src="${esc(src)}" alt="" onerror="this.src='assets/icons/misc.svg'"><div class="txt"><b>${esc(name)}</b><small>#${idx} · ${esc(type)}${tier!=null?' · t'+tier:''}</small></div>${btns}</div>`;
+    return `<div class="list-item">${itemIconImg(it)}<div class="txt"><b>${esc(name)}</b><small>#${idx} · ${esc(type)}${tier!=null?' · t'+tier:''}</small></div>${btns}</div>`;
   }).join('')||'<div class="list-item">Инвентарь BLT пуст (владелец видит CustomItems)</div>';
 }
 function historyList(){
@@ -2779,6 +2817,7 @@ function switchTab(id){
   }
   currentTab = id;
   renderAll();
+  announcePresenceHere();
   if (isShopTab(id) && isPanelOwner() && isGameOnline() && (!(house.shopItems||[]).length)) {
     postAction('refresh_shop', { value: 'refresh' });
   }
